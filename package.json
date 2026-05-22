@@ -2,13 +2,14 @@
   "name": "radiostation-cd-ripper",
   "version": "1.1.0",
   "description": "Import CD vers RadioStation — application autonome",
+  "author": "RadioStation",
   "main": "electron-main.js",
   "scripts": {
     "start": "node main.js",
     "electron": "electron .",
     "build:win": "electron-builder --win --x64",
-    "build:mac": "electron-builder --mac",
-    "build:linux": "electron-builder --linux",
+    "build:mac": "electron-builder --mac --arm64",
+    "build:linux": "electron-builder --linux --x64",
     "build:all": "electron-builder --win --mac --linux"
   },
   "dependencies": {
@@ -37,6 +38,20 @@
       "node_modules/ffmpeg-static/**",
       "node_modules/ffprobe-static/**"
     ],
-    "afterSign": "scripts/notarize.js"
+    "afterSign": "scripts/notarize.js",
+    "mac": {
+      "target": [{ "target": "dmg", "arch": ["arm64"] }],
+      "identity": null,
+      "artifactName": "RadioStation-CD-Ripper.dmg"
+    },
+    "win": {
+      "target": [{ "target": "nsis", "arch": ["x64"] }],
+      "artifactName": "RadioStation-CD-Ripper-Setup.exe"
+    },
+    "linux": {
+      "target": [{ "target": "AppImage", "arch": ["x64"] }],
+      "artifactName": "RadioStation-CD-Ripper.AppImage",
+      "category": "Audio"
+    }
   }
 }
