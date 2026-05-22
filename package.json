@@ -41,7 +41,6 @@
     "afterSign": "scripts/notarize.js",
     "mac": {
       "target": [{ "target": "dmg", "arch": ["arm64"] }],
-      "identity": null,
       "artifactName": "RadioStation-CD-Ripper.dmg"
     },
     "win": {
