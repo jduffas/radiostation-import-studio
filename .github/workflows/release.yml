@@ -21,12 +21,15 @@ jobs:
 
       - run: npm ci
 
+      - name: Décoder le certificat macOS
+        run: echo "${{ secrets.MAC_CERT_P12_BASE64 }}" | base64 --decode > /tmp/certificate.p12
+
       - name: Build macOS (.dmg)
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          CSC_LINK: ${{ secrets.MAC_CERT_P12_BASE64 }}
+          CSC_LINK: /tmp/certificate.p12
           CSC_KEY_PASSWORD: ${{ secrets.MAC_CERT_PASSWORD }}
         run: npx electron-builder --mac --arm64 --publish never
 
