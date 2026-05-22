@@ -32,7 +32,8 @@
       "electron-main.js",
       "main.js",
       "package.json",
-      "icon.*"
+      "icon.*",
+      "tray-icon.*"
     ],
     "asarUnpack": [
       "node_modules/ffmpeg-static/**",

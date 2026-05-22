@@ -19,7 +19,7 @@ let contextMenu = null;
 
 // ---- Icône (inline SVG converti en dataURL si pas de fichier) ----
 function loadIcon() {
-  const iconFile = path.join(__dirname, 'icon.png');
+  const iconFile = path.join(__dirname, 'tray-icon.png');
   try {
     const img = nativeImage.createFromPath(iconFile);
     if (!img.isEmpty()) {
