@@ -42,7 +42,10 @@
     "mac": {
       "target": [{ "target": "dmg", "arch": ["arm64"] }],
       "artifactName": "RadioStation-CD-Ripper.dmg",
-      "notarize": false
+      "notarize": false,
+      "extendInfo": {
+        "LSUIElement": true
+      }
     },
     "win": {
       "target": [{ "target": "nsis", "arch": ["x64"] }],

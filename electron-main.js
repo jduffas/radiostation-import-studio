@@ -15,6 +15,7 @@ if (!app.requestSingleInstanceLock()) {
 }
 
 let tray = null;
+let contextMenu = null;
 
 // ---- Icône (inline SVG converti en dataURL si pas de fichier) ----
 function loadIcon() {
@@ -62,7 +63,7 @@ function startServer() {
 // ---- Menu barre système ----
 function buildMenu(status) {
   const loginEnabled = app.getLoginItemSettings().openAtLogin;
-  return Menu.buildFromTemplate([
+  contextMenu = Menu.buildFromTemplate([
     { label: 'RadioStation CD Ripper', enabled: false },
     { label: status, enabled: false },
     { type: 'separator' },
@@ -79,7 +80,8 @@ function buildMenu(status) {
       checked: loginEnabled,
       click: (menuItem) => {
         app.setLoginItemSettings({ openAtLogin: menuItem.checked });
-        tray.setContextMenu(buildMenu(status));
+        buildMenu(status);
+        tray.setContextMenu(contextMenu);
       },
     },
     { type: 'separator' },
@@ -88,6 +90,7 @@ function buildMenu(status) {
       click: () => app.quit(),
     },
   ]);
+  return contextMenu;
 }
 
 // ---- App prête ----
@@ -101,9 +104,11 @@ app.whenReady().then(() => {
   tray = new Tray(icon);
   tray.setToolTip('RadioStation CD Ripper');
   tray.setContextMenu(buildMenu('Serveur actif — port 19847'));
-  // Sur macOS, le clic gauche n'ouvre pas le menu sans handler explicite
+  // Sur macOS, le clic gauche n'ouvre pas le menu sans handler explicite.
+  // On passe contextMenu explicitement — popUpContextMenu() sans arg est peu fiable.
   if (process.platform === 'darwin') {
-    tray.on('click', () => tray.popUpContextMenu());
+    tray.on('click', () => tray.popUpContextMenu(contextMenu));
+    tray.on('right-click', () => tray.popUpContextMenu(contextMenu));
   }
 
   // Notification de démarrage
