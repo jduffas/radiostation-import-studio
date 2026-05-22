@@ -1,0 +1,42 @@
+{
+  "name": "radiostation-cd-ripper",
+  "version": "1.1.0",
+  "description": "Import CD vers RadioStation — application autonome",
+  "main": "electron-main.js",
+  "scripts": {
+    "start": "node main.js",
+    "electron": "electron .",
+    "build:win": "electron-builder --win --x64",
+    "build:mac": "electron-builder --mac",
+    "build:linux": "electron-builder --linux",
+    "build:all": "electron-builder --win --mac --linux"
+  },
+  "dependencies": {
+    "ffmpeg-static": "^5.2.0",
+    "ffprobe-static": "^3.1.0"
+  },
+  "devDependencies": {
+    "@electron/notarize": "^2.5.0",
+    "electron": "^28.3.3",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "fr.radiostation.cd-ripper",
+    "productName": "RadioStation CD Ripper",
+    "copyright": "RadioStation",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "electron-main.js",
+      "main.js",
+      "package.json",
+      "icon.*"
+    ],
+    "asarUnpack": [
+      "node_modules/ffmpeg-static/**",
+      "node_modules/ffprobe-static/**"
+    ],
+    "afterSign": "scripts/notarize.js"
+  }
+}

@@ -1,0 +1,108 @@
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-mac:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - run: npm ci
+
+      - name: Build macOS (.dmg)
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          CSC_LINK: ${{ secrets.MAC_CERT_P12_BASE64 }}
+          CSC_KEY_PASSWORD: ${{ secrets.MAC_CERT_PASSWORD }}
+        run: npm run build:mac
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mac-dmg
+          path: dist/*.dmg
+
+  build-win:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - run: npm ci
+
+      - name: Build Windows (.exe)
+        run: npm run build:win
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: win-exe
+          path: dist/*.exe
+
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - run: npm ci
+
+      - name: Build Linux (.AppImage)
+        run: npm run build:linux
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-appimage
+          path: dist/*.AppImage
+
+  release:
+    needs: [build-mac, build-win, build-linux]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Créer la release GitHub
+        uses: softprops/action-gh-release@v2
+        with:
+          name: RadioStation CD Ripper ${{ github.ref_name }}
+          body: |
+            ## RadioStation CD Ripper ${{ github.ref_name }}
+
+            Application autonome pour importer des CD audio dans RadioStation.
+
+            ### Téléchargement
+            - **macOS** : `.dmg` — glisser l'app dans Applications
+            - **Windows** : `.exe` — installeur standard
+            - **Linux** : `.AppImage` — `chmod +x` puis exécuter
+
+            ### Prérequis
+            - macOS / Windows : aucun (ffmpeg inclus)
+            - Linux : `sudo apt install ffmpeg cdparanoia` (ou via le script `start.sh`)
+          files: |
+            artifacts/mac-dmg/*.dmg
+            artifacts/win-exe/*.exe
+            artifacts/linux-appimage/*.AppImage
+          draft: false
+          prerelease: false

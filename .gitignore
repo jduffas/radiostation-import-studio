@@ -1,0 +1,12 @@
+node_modules/
+dist/
+out/
+*.log
+
+# macOS
+.DS_Store
+
+# Clés et secrets (ne jamais committer)
+*.p12
+*.p8
+.env
