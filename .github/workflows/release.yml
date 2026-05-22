@@ -21,15 +21,25 @@ jobs:
 
       - run: npm ci
 
-      - name: Décoder le certificat macOS
-        run: echo "${{ secrets.MAC_CERT_P12_BASE64 }}" | base64 --decode > /tmp/certificate.p12
+      - name: Importer le certificat dans le keychain
+        run: |
+          CERT_PATH=$RUNNER_TEMP/certificate.p12
+          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+          KEYCHAIN_PASS="temp-keychain-password"
+          echo "${{ secrets.MAC_CERT_P12_BASE64 }}" | base64 --decode > "$CERT_PATH"
+          security create-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN_PATH"
+          security import "$CERT_PATH" -P "${{ secrets.MAC_CERT_PASSWORD }}" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASS" "$KEYCHAIN_PATH"
+          security list-keychain -d user -s "$KEYCHAIN_PATH"
+          rm "$CERT_PATH"
 
       - name: Build macOS (.dmg)
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          CSC_LINK: /tmp/certificate.p12
           CSC_KEY_PASSWORD: ${{ secrets.MAC_CERT_PASSWORD }}
         run: npx electron-builder --mac --arm64 --publish never
 
