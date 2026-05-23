@@ -62,7 +62,7 @@ try {
 // ============================================================
 
 let ripState = {
-  status: 'idle', // idle | detecting | ripping | uploading | done | error
+  status: 'idle', // idle | detecting | ripping | analyzing | uploading | done | error
   totalTracks: 0,
   currentTrack: 0,
   progress: 0,
@@ -74,6 +74,174 @@ let ripState = {
 
 function sleep(ms) {
   return new Promise(r => setTimeout(r, ms));
+}
+
+// ============================================================
+// Paramètres persistants
+// ============================================================
+
+const SETTINGS_DIR = path.join(os.homedir(), '.radiostation-cd-ripper');
+const SETTINGS_PATH = path.join(SETTINGS_DIR, 'settings.json');
+
+function loadSettings() {
+  try {
+    return JSON.parse(fs.readFileSync(SETTINGS_PATH, 'utf8'));
+  } catch {
+    return { vocal_analysis_enabled: false };
+  }
+}
+
+function saveSettings(updates) {
+  const current = loadSettings();
+  const merged = { ...current, ...updates };
+  try {
+    fs.mkdirSync(SETTINGS_DIR, { recursive: true });
+    fs.writeFileSync(SETTINGS_PATH, JSON.stringify(merged, null, 2));
+  } catch (e) {
+    console.error('[settings] Erreur écriture:', e.message);
+  }
+  return merged;
+}
+
+// ============================================================
+// Analyse vocale — détection des zones sans voix (FFmpeg)
+// ============================================================
+
+/**
+ * Analyse un fichier WAV pour détecter les zones de faible activité vocale.
+ * Applique un filtre passe-bande (300–3500 Hz) pour isoler les fréquences
+ * vocales, mesure l'énergie RMS par fenêtres de 500 ms, et retourne les
+ * zones les plus calmes triées par score (durée × bonus position).
+ *
+ * @param {string} wavPath   Chemin du fichier WAV à analyser
+ * @param {number|null} durationMs  Durée totale estimée en ms (pour timeout)
+ * @returns {Promise<Array<{start_ms,end_ms,duration_ms,avg_rms_db}>>}
+ */
+async function analyzeVocalZones(wavPath, durationMs) {
+  return new Promise((resolve) => {
+    const statsPath = path.join(os.tmpdir(), `rsanalysis-${Date.now()}-${Math.random().toString(36).slice(2)}.txt`);
+    const nullOutput = PLATFORM === 'win32' ? 'NUL' : '/dev/null';
+
+    const filterChain = [
+      'highpass=f=300',
+      'lowpass=f=3500',
+      'astats=metadata=1:reset=22050',
+      `ametadata=mode=print:file=${statsPath}`,
+    ].join(',');
+
+    const proc = spawn(FFMPEG, [
+      '-v', 'quiet',
+      '-i', wavPath,
+      '-af', filterChain,
+      '-f', 'null', nullOutput,
+    ]);
+
+    let stderr = '';
+    proc.stderr.on('data', d => { stderr += d.toString(); });
+
+    // Timeout : 2× durée de la piste ou 5 minutes max
+    const maxMs = Math.min(Math.max(60000, (durationMs || 240000) * 2), 300000);
+    const timer = setTimeout(() => {
+      try { proc.kill(); } catch {}
+      try { fs.unlinkSync(statsPath); } catch {}
+      console.warn('[analyzeVocalZones] Timeout après', maxMs, 'ms');
+      resolve([]);
+    }, maxMs);
+
+    proc.on('close', (code) => {
+      clearTimeout(timer);
+      if (code !== 0) {
+        console.warn('[analyzeVocalZones] FFmpeg exit', code, stderr.slice(-200));
+        try { fs.unlinkSync(statsPath); } catch {}
+        resolve([]);
+        return;
+      }
+      try {
+        const output = fs.readFileSync(statsPath, 'utf8');
+        try { fs.unlinkSync(statsPath); } catch {}
+        resolve(_computeVocalZones(output, durationMs));
+      } catch (e) {
+        console.warn('[analyzeVocalZones] Erreur lecture stats:', e.message);
+        resolve([]);
+      }
+    });
+
+    proc.on('error', (e) => {
+      clearTimeout(timer);
+      try { fs.unlinkSync(statsPath); } catch {}
+      console.warn('[analyzeVocalZones] Erreur spawn:', e.message);
+      resolve([]);
+    });
+  });
+}
+
+function _parseAstats(output) {
+  const windows = [];
+  let currentTime = -1;
+  for (const line of output.split('\n')) {
+    const tm = line.match(/pts_time:(\d+\.?\d*)/);
+    if (tm) { currentTime = Math.round(parseFloat(tm[1]) * 1000); continue; }
+    const rm = line.match(/lavfi\.astats\.Overall\.RMS_level=(-?[\d.]+|-inf)/);
+    if (rm && currentTime >= 0) {
+      const rms = rm[1] === '-inf' ? -60 : parseFloat(rm[1]);
+      if (isFinite(rms)) windows.push({ time_ms: currentTime, rms_db: rms });
+    }
+  }
+  return windows;
+}
+
+function _computeVocalZones(output, totalDurationMs) {
+  const windows = _parseAstats(output);
+  if (windows.length < 4) return [];
+
+  // Seuil adaptatif : médiane des fenêtres actives − 10 dB
+  const active = windows.filter(w => w.rms_db > -55);
+  if (!active.length) return [];
+  const sortedRms = [...active].sort((a, b) => a.rms_db - b.rms_db);
+  const median = sortedRms[Math.floor(sortedRms.length * 0.5)].rms_db;
+  const threshold = median - 10;
+
+  const WINDOW_MS = 500;
+  const total = totalDurationMs || (windows[windows.length - 1].time_ms + WINDOW_MS);
+  const MIN_ZONE_MS = total > 30000 ? 2000 : 1000;
+  const GAP_MS = WINDOW_MS * 2; // tolérance 1 fenêtre de vide entre deux zones
+
+  const quiet = windows.filter(w => w.rms_db < threshold);
+  if (!quiet.length) return [];
+
+  // Fusion des fenêtres adjacentes en zones continues
+  const zones = [];
+  let zStart = quiet[0].time_ms;
+  let zEnd = quiet[0].time_ms + WINDOW_MS;
+  let sumRms = quiet[0].rms_db;
+  let cnt = 1;
+
+  for (let i = 1; i < quiet.length; i++) {
+    const w = quiet[i];
+    if (w.time_ms <= zEnd + GAP_MS) {
+      zEnd = w.time_ms + WINDOW_MS;
+      sumRms += w.rms_db;
+      cnt++;
+    } else {
+      if (zEnd - zStart >= MIN_ZONE_MS) {
+        zones.push({ start_ms: zStart, end_ms: Math.min(zEnd, total), duration_ms: zEnd - zStart, avg_rms_db: Math.round((sumRms / cnt) * 10) / 10 });
+      }
+      zStart = w.time_ms; zEnd = w.time_ms + WINDOW_MS; sumRms = w.rms_db; cnt = 1;
+    }
+  }
+  if (zEnd - zStart >= MIN_ZONE_MS) {
+    zones.push({ start_ms: zStart, end_ms: Math.min(zEnd, total), duration_ms: zEnd - zStart, avg_rms_db: Math.round((sumRms / cnt) * 10) / 10 });
+  }
+
+  // Score = durée × bonus intro/outro (premiers/derniers 20%)
+  zones.forEach(z => {
+    const rel = ((z.start_ms + z.end_ms) / 2) / total;
+    z._score = z.duration_ms * ((rel < 0.2 || rel > 0.8) ? 1.3 : 1.0);
+  });
+  zones.sort((a, b) => b._score - a._score);
+  zones.forEach(z => delete z._score);
+
+  return zones.slice(0, 5);
 }
 
 // ============================================================
@@ -694,6 +862,25 @@ async function doRip(backendUrl, authToken, trackNumbers = null) {
     }
 
     ripState.progress = 70;
+
+    // ---- Analyse vocale (optionnelle) ----
+    if (loadSettings().vocal_analysis_enabled) {
+      ripState.status = 'analyzing';
+      for (let i = 0; i < files.length; i++) {
+        ripState.currentTrack = i + 1;
+        ripState.progress = 70 + Math.round((i / files.length) * 15); // 70→85 %
+        console.log(`[analyzeVocal] Analyse piste ${i + 1}/${files.length} : ${files[i].filePath}`);
+        const zones = await analyzeVocalZones(files[i].filePath, null);
+        if (zones.length > 0) {
+          files[i].meta.vocal_zones = zones;
+          console.log(`[analyzeVocal] Piste ${i + 1} : ${zones.length} zone(s) détectée(s), meilleure = ${zones[0].duration_ms}ms`);
+        } else {
+          console.log(`[analyzeVocal] Piste ${i + 1} : aucune zone détectée`);
+        }
+      }
+    }
+
+    ripState.progress = 85;
     ripState.status = 'uploading';
 
     const metaArr = files.map(f => f.meta);
@@ -898,6 +1085,23 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // ── Paramètres ──────────────────────────────────────────────────────────────
+  if (req.method === 'GET' && pathname === '/settings') {
+    return jsonResp(res, 200, loadSettings());
+  }
+
+  if (req.method === 'POST' && pathname === '/settings') {
+    let body = '';
+    req.on('data', c => { body += c; });
+    req.on('end', () => {
+      let payload = {};
+      try { payload = JSON.parse(body); } catch { /* ignore */ }
+      const s = saveSettings({ vocal_analysis_enabled: !!payload.vocal_analysis_enabled });
+      jsonResp(res, 200, s);
+    });
+    return;
+  }
+
   jsonResp(res, 404, { error: 'Not found' });
 });
 
@@ -910,3 +1114,6 @@ server.listen(PORT, '127.0.0.1', () => {
   console.log(`Plateforme : ${PLATFORM} | ffmpeg bundlé : ${BUNDLED_FFMPEG}`);
   if (PLATFORM === 'win32') console.log(`Lecteur CD : ${getCdDevice()}`);
 });
+
+// Exports pour electron-main.js (settings partagés dans le même processus)
+module.exports = { loadSettings, saveSettings };

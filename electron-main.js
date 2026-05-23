@@ -63,6 +63,15 @@ function startServer() {
 // ---- Menu barre système ----
 function buildMenu(status) {
   const loginEnabled = app.getLoginItemSettings().openAtLogin;
+
+  // Lire les paramètres depuis main.js (déjà chargé via startServer)
+  let vocalEnabled = false;
+  let cdRipperModule = null;
+  try {
+    cdRipperModule = require('./main.js');
+    vocalEnabled = !!cdRipperModule.loadSettings().vocal_analysis_enabled;
+  } catch { /* main.js pas encore chargé */ }
+
   contextMenu = Menu.buildFromTemplate([
     { label: 'RadioStation CD Ripper', enabled: false },
     { label: status, enabled: false },
@@ -72,6 +81,22 @@ function buildMenu(status) {
       click: () => shell.openExternal(
         process.env.RADIOSTATION_URL || 'http://localhost:8080'
       ),
+    },
+    { type: 'separator' },
+    {
+      label: 'Analyse vocale (zones jingle)',
+      type: 'checkbox',
+      checked: vocalEnabled,
+      toolTip: 'Détecter automatiquement les zones sans voix après chaque rip',
+      click: (menuItem) => {
+        try {
+          const m = require('./main.js');
+          m.saveSettings({ vocal_analysis_enabled: menuItem.checked });
+        } catch (e) {
+          dialog.showErrorBox('Erreur', `Impossible de sauvegarder les paramètres :\n${e.message}`);
+        }
+        // Pas de rebuild menu — la coche est mise à jour par Electron nativement
+      },
     },
     { type: 'separator' },
     {
