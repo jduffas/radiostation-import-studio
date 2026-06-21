@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: write
+  actions: write
 
 jobs:
   build-mac:
@@ -57,6 +58,7 @@ jobs:
         with:
           name: mac-dmg
           path: dist/*.dmg
+          retention-days: 1
 
   build-win:
     runs-on: windows-latest
@@ -77,6 +79,7 @@ jobs:
         with:
           name: win-exe
           path: dist/*.exe
+          retention-days: 1
 
   build-linux:
     runs-on: ubuntu-latest
@@ -97,6 +100,7 @@ jobs:
         with:
           name: linux-appimage
           path: dist/*.AppImage
+          retention-days: 1
 
   release:
     needs: [build-mac, build-win, build-linux]
@@ -129,3 +133,13 @@ jobs:
             artifacts/linux-appimage/*.AppImage
           draft: false
           prerelease: false
+
+      - name: Supprimer les artifacts du run
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for artifact_id in $(gh api /repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts -q '.artifacts[].id'); do
+            gh api -X DELETE /repos/${{ github.repository }}/actions/artifacts/$artifact_id && \
+              echo "Artifact $artifact_id supprime" || echo "Echec suppression $artifact_id"
+          done

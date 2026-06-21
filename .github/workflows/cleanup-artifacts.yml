@@ -1,0 +1,21 @@
+name: Nettoyage des artefacts
+
+on:
+  schedule:
+    - cron: '0 3 * * *'  # Chaque jour à 3h
+  workflow_dispatch:
+
+jobs:
+  cleanup:
+    name: Supprimer les anciens artefacts
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: write
+
+    steps:
+      - name: Supprimer les anciens artefacts
+        uses: c-hive/gha-remove-artifacts@v1
+        with:
+          age: '1 hour'
+          skip-recent: 3
