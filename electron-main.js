@@ -6,9 +6,14 @@
  */
 
 const { app, Tray, Menu, shell, nativeImage, dialog, Notification } = require('electron');
+const https = require('https');
+const http = require('http');
+const os = require('os');
 const path = require('path');
+const { URL } = require('url');
 
-// Une seule instance autorisée
+// Une seule instance autorisée — prérequis pour capturer le lien de pairing dans
+// 'second-instance' (Windows/Linux) au lieu d'ouvrir une 2e app qui ne saurait rien en faire.
 if (!app.requestSingleInstanceLock()) {
   app.quit();
   process.exit(0);
@@ -16,6 +21,84 @@ if (!app.requestSingleInstanceLock()) {
 
 let tray = null;
 let contextMenu = null;
+
+// ---- Appairage autonome (Phase 2c) : radiostation-cdripper://pair?server=…&code=… ----
+// macOS : reçu via l'event 'open-url'. Windows/Linux : l'OS relance une 2e instance avec le
+// lien en argv, interceptée par 'second-instance' grâce au verrou single-instance ci-dessus.
+app.setAsDefaultProtocolClient('radiostation-cdripper');
+
+function extractPairingUrl(argv) {
+  return argv.find((a) => a.startsWith('radiostation-cdripper://'));
+}
+
+function httpPostJson(urlStr, body) {
+  return new Promise((resolve, reject) => {
+    let target;
+    try { target = new URL(urlStr); } catch (e) { return reject(e); }
+    const mod = target.protocol === 'https:' ? https : http;
+    const payload = JSON.stringify(body);
+    const req = mod.request(target, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) },
+    }, (res) => {
+      let data = '';
+      res.on('data', (d) => { data += d; });
+      res.on('end', () => {
+        try {
+          const parsed = JSON.parse(data);
+          if (res.statusCode >= 200 && res.statusCode < 300) resolve(parsed);
+          else reject(new Error(parsed.detail || `HTTP ${res.statusCode}`));
+        } catch (e) { reject(e); }
+      });
+    });
+    req.on('error', reject);
+    req.write(payload);
+    req.end();
+  });
+}
+
+async function handlePairingUrl(pairingUrl) {
+  let parsed;
+  try { parsed = new URL(pairingUrl); } catch { return; }
+  const server = parsed.searchParams.get('server');
+  const code = parsed.searchParams.get('code');
+  if (!server || !code) return;
+
+  try {
+    const result = await httpPostJson(`${server}/api/importer/cd-ripper/pair/exchange`, {
+      code,
+      platform: process.platform,
+      label: os.hostname(),
+    });
+    const m = require('./main.js');
+    m.saveSettings({ server_url: server, device_token: result.device_token });
+    if (Notification.isSupported()) {
+      new Notification({
+        title: 'RadioStation CD Ripper',
+        body: 'Application connectée à ' + server,
+      }).show();
+    }
+  } catch (e) {
+    if (Notification.isSupported()) {
+      new Notification({
+        title: 'RadioStation CD Ripper — échec de connexion',
+        body: e.message,
+      }).show();
+    }
+  }
+}
+
+// Windows/Linux : lien reçu en argv d'une 2e instance bloquée par le verrou single-instance.
+app.on('second-instance', (_event, argv) => {
+  const pairingUrl = extractPairingUrl(argv);
+  if (pairingUrl) handlePairingUrl(pairingUrl);
+});
+
+// macOS : lien reçu via l'event dédié du système (LSApplicationCategoryType URL scheme).
+app.on('open-url', (event, pairingUrl) => {
+  event.preventDefault();
+  handlePairingUrl(pairingUrl);
+});
 
 // ---- Icône (inline SVG converti en dataURL si pas de fichier) ----
 function loadIcon() {
@@ -124,6 +207,11 @@ app.whenReady().then(() => {
   if (process.platform === 'darwin' && app.dock) app.dock.hide();
 
   startServer();
+
+  // Windows/Linux : 1er lancement de l'app DEPUIS le lien (pas encore d'instance tournante,
+  // donc pas de 'second-instance') — le lien est déjà dans nos propres process.argv.
+  const startupPairingUrl = extractPairingUrl(process.argv);
+  if (startupPairingUrl) handlePairingUrl(startupPairingUrl);
 
   const icon = loadIcon();
   tray = new Tray(icon);

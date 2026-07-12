@@ -1115,8 +1115,13 @@ const server = http.createServer(async (req, res) => {
     req.on('end', () => {
       let payload = {};
       try { payload = JSON.parse(body); } catch { /* ignore */ }
-      const backendUrl = payload.backend_url || process.env.RADIOSTATION_URL || 'http://localhost:8000';
-      const authToken = payload.auth_token || '';
+      // Mode autonome (Phase 2c) : sans auth_token de session (pas de navigateur), retomber sur
+      // le jeton d'appareil appairé stocké localement — même en-tête Authorization: Bearer côté
+      // backend, qui distingue les deux via get_current_user_or_device_token. Le backend garde
+      // toujours la priorité quand un navigateur pilote la requête (comportement inchangé).
+      const stored = loadSettings();
+      const backendUrl = payload.backend_url || stored.server_url || process.env.RADIOSTATION_URL || 'http://localhost:8000';
+      const authToken = payload.auth_token || stored.device_token || '';
       const trackNumbers = Array.isArray(payload.track_numbers) && payload.track_numbers.length > 0
         ? payload.track_numbers.map(Number).filter(n => n > 0)
         : null;

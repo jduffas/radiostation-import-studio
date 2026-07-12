@@ -39,6 +39,10 @@
       "node_modules/ffmpeg-static/**",
       "node_modules/ffprobe-static/**"
     ],
+    "protocols": {
+      "name": "RadioStation CD Ripper Pairing",
+      "schemes": ["radiostation-cdripper"]
+    },
     "afterSign": "scripts/notarize.js",
     "mac": {
       "target": [{ "target": "dmg", "arch": ["arm64"] }],
