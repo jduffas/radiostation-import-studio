@@ -1,4 +1,5 @@
 import Cocoa
+import UserNotifications
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Point d'entrée — menu bar app sans icône Dock
@@ -23,8 +24,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: — Lifecycle
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        buildStatusItem()
+        // Le serveur démarre avant le menu pour que la lecture de /settings (case
+        // "Analyse vocale") ait une petite longueur d'avance — reste best-effort,
+        // le spawn du process ne garantit pas que le serveur HTTP écoute déjà.
         startNodeServer()
+        buildStatusItem()
+        sendStartupNotification()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -66,6 +71,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             action: #selector(configureURL),
             keyEquivalent: ""
         ))
+        menu.addItem(.separator())
+
+        let vocalItem = NSMenuItem(
+            title: "Analyse vocale (zones jingle)",
+            action: #selector(toggleVocalAnalysis(_:)),
+            keyEquivalent: ""
+        )
+        vocalItem.toolTip = "Détecter automatiquement les zones sans voix après chaque rip"
+        vocalItem.state = fetchVocalAnalysisEnabled() ? .on : .off
+        menu.addItem(vocalItem)
+
         menu.addItem(.separator())
 
         let loginItem = NSMenuItem(
@@ -120,6 +136,69 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let enable = sender.state == .off
         setLoginItem(enabled: enable)
         sender.state = enable ? .on : .off
+    }
+
+    // MARK: — Réglages du serveur local (/settings)
+
+    private static let settingsURL = URL(string: "http://127.0.0.1:19847/settings")!
+
+    /// Lecture synchrone de `vocal_analysis_enabled` — best-effort, quelques tentatives
+    /// courtes car appelée juste après le lancement du process node (course possible).
+    private func fetchVocalAnalysisEnabled() -> Bool {
+        for attempt in 0..<3 {
+            if attempt > 0 { Thread.sleep(forTimeInterval: 0.2) }
+            let semaphore = DispatchSemaphore(value: 0)
+            var result: Bool?
+            var request = URLRequest(url: Self.settingsURL)
+            request.timeoutInterval = 0.5
+            URLSession.shared.dataTask(with: request) { data, _, _ in
+                if let data,
+                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                    result = (json["vocal_analysis_enabled"] as? Bool) ?? false
+                }
+                semaphore.signal()
+            }.resume()
+            _ = semaphore.wait(timeout: .now() + 0.6)
+            if let result { return result }
+        }
+        return false
+    }
+
+    @objc private func toggleVocalAnalysis(_ sender: NSMenuItem) {
+        let enable = sender.state == .off
+        sender.state = enable ? .on : .off // optimiste — Electron ne rebuild pas non plus le menu
+
+        var request = URLRequest(url: Self.settingsURL)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try? JSONSerialization.data(withJSONObject: ["vocal_analysis_enabled": enable])
+
+        URLSession.shared.dataTask(with: request) { _, response, error in
+            let ok = error == nil && (response as? HTTPURLResponse)?.statusCode == 200
+            if !ok {
+                DispatchQueue.main.async {
+                    sender.state = enable ? .off : .on // revert
+                    let alert = NSAlert()
+                    alert.messageText = "Erreur"
+                    alert.informativeText = "Impossible de sauvegarder les paramètres."
+                    alert.runModal()
+                }
+            }
+        }.resume()
+    }
+
+    // MARK: — Notification de démarrage
+
+    private func sendStartupNotification() {
+        let center = UNUserNotificationCenter.current()
+        center.requestAuthorization(options: [.alert]) { granted, _ in
+            guard granted else { return }
+            let content = UNMutableNotificationContent()
+            content.title = "RadioStation CD Ripper"
+            content.body  = "Serveur démarré — vous pouvez importer des CD depuis RadioStation."
+            let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
+            center.add(request)
+        }
     }
 
     // MARK: — Login item (LaunchAgent plist)

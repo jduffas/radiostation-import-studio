@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """RadioStation CD Ripper — tray Linux (pystray + Pillow)"""
 
+import json
 import os
 import shutil
 import subprocess
 import sys
 import threading
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 import pystray
@@ -18,9 +21,10 @@ from PIL import Image, ImageDraw
 # racine du bundle AppImage où se trouvent node, main.js et node_modules.
 # ─────────────────────────────────────────────────────────────────────────────
 
-APP_NAME  = "RadioStation CD Ripper"
-PORT      = 19847
-BUNDLE_ID = "fr.radiostation.cd-ripper"
+APP_NAME     = "RadioStation CD Ripper"
+PORT         = 19847
+BUNDLE_ID    = "fr.radiostation.cd-ripper"
+SETTINGS_URL = f"http://127.0.0.1:{PORT}/settings"
 
 _frozen = getattr(sys, "frozen", False)
 _here   = Path(sys.executable if _frozen else __file__).resolve().parent
@@ -130,6 +134,22 @@ def _set_login_item(enabled: bool):
         path.unlink(missing_ok=True)
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Réglages du serveur local (/settings) — pas de course au démarrage à gérer
+# ici : contrairement aux trays Swift/C#, pystray réévalue `checked` à chaque
+# ouverture du menu (pas une seule fois à la construction), donc un serveur pas
+# encore prêt au tout premier affichage se corrige de lui-même à l'ouverture
+# suivante, sans logique de retry.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _fetch_vocal_analysis_enabled() -> bool:
+    try:
+        with urllib.request.urlopen(SETTINGS_URL, timeout=1) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            return bool(data.get("vocal_analysis_enabled"))
+    except (urllib.error.URLError, OSError, ValueError):
+        return False
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Menu et tray
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -141,6 +161,22 @@ def _open_browser(icon, item):
 def _toggle_login(icon, item):
     _set_login_item(not _is_login_enabled())
     icon.menu = _build_menu()
+
+
+def _toggle_vocal_analysis(icon, item):
+    enable = not _fetch_vocal_analysis_enabled()
+    body = json.dumps({"vocal_analysis_enabled": enable}).encode("utf-8")
+    req = urllib.request.Request(
+        SETTINGS_URL, data=body, method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        urllib.request.urlopen(req, timeout=1)
+    except (urllib.error.URLError, OSError):
+        try:
+            icon.notify("Impossible de sauvegarder les paramètres.", APP_NAME)
+        except Exception:
+            pass  # notify() dépend du backend desktop, pas garanti partout
 
 
 def _quit_app(icon, item):
@@ -157,6 +193,12 @@ def _build_menu():
         pystray.MenuItem("Ouvrir RadioStation dans le navigateur", _open_browser),
         pystray.Menu.SEPARATOR,
         pystray.MenuItem(
+            "Analyse vocale (zones jingle)",
+            _toggle_vocal_analysis,
+            checked=lambda item: _fetch_vocal_analysis_enabled(),
+        ),
+        pystray.Menu.SEPARATOR,
+        pystray.MenuItem(
             "Démarrer automatiquement au login",
             _toggle_login,
             checked=lambda item: _is_login_enabled(),
@@ -169,10 +211,21 @@ def _build_menu():
 # Main
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _on_ready(icon):
+    icon.visible = True
+    try:
+        icon.notify(
+            "Serveur démarré — vous pouvez importer des CD depuis RadioStation.",
+            APP_NAME,
+        )
+    except Exception:
+        pass  # notify() dépend du backend desktop (libnotify), pas garanti partout
+
+
 def main():
     _start_node_server()
     icon = pystray.Icon(BUNDLE_ID, make_icon(), APP_NAME, _build_menu())
-    icon.run()
+    icon.run(setup=_on_ready)
 
 
 if __name__ == "__main__":

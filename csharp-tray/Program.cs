@@ -2,6 +2,10 @@ using System;
 using System.Diagnostics;
 using System.Drawing;
 using System.IO;
+using System.Net.Http;
+using System.Text;
+using System.Text.Json;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 using Microsoft.Win32;
 
@@ -37,6 +41,10 @@ class TrayApp : ApplicationContext
     private const string RegRunKey     = @"Software\Microsoft\Windows\CurrentVersion\Run";
     private const string RegRunValue   = "RadioStationCDRipper";
 
+    private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromMilliseconds(600) };
+    // Pas "const" : une chaîne interpolée avec un placeholder int n'est pas une constante de compilation en C#.
+    private static readonly string SettingsUrl = $"http://127.0.0.1:{Port}/settings";
+
     public TrayApp()
     {
         _tray = new NotifyIcon
@@ -46,9 +54,12 @@ class TrayApp : ApplicationContext
             Text    = AppName,
         };
         _tray.DoubleClick += (_, _) => OpenBrowser();
-        _tray.ContextMenuStrip = BuildMenu();
 
+        // Le serveur démarre avant le menu pour que la lecture de /settings (case
+        // "Analyse vocale") ait une petite longueur d'avance — reste best-effort.
         StartNodeServer();
+        _tray.ContextMenuStrip = BuildMenu();
+        ShowStartupNotification();
     }
 
     // ── Menu ─────────────────────────────────────────────────────────────────
@@ -64,6 +75,21 @@ class TrayApp : ApplicationContext
         var openItem = new ToolStripMenuItem("Ouvrir RadioStation dans le navigateur");
         openItem.Click += (_, _) => OpenBrowser();
         menu.Items.Add(openItem);
+
+        menu.Items.Add(new ToolStripSeparator());
+
+        var vocalItem = new ToolStripMenuItem("Analyse vocale (zones jingle)")
+        {
+            Checked = FetchVocalAnalysisEnabled(),
+            ToolTipText = "Détecter automatiquement les zones sans voix après chaque rip",
+        };
+        vocalItem.Click += (_, _) =>
+        {
+            var enable = !vocalItem.Checked;
+            vocalItem.Checked = enable; // optimiste, comme Electron
+            SetVocalAnalysisEnabled(enable, vocalItem);
+        };
+        menu.Items.Add(vocalItem);
 
         menu.Items.Add(new ToolStripSeparator());
 
@@ -211,6 +237,62 @@ class TrayApp : ApplicationContext
             key.SetValue(RegRunValue, Application.ExecutablePath);
         else
             key.DeleteValue(RegRunValue, throwOnMissingValue: false);
+    }
+
+    // ── Réglages du serveur local (/settings) ─────────────────────────────────
+
+    /// Lecture synchrone (bloque le thread UI au démarrage, court) de
+    /// `vocal_analysis_enabled` — best-effort, quelques tentatives courtes car
+    /// appelée juste après le lancement du process node (course possible).
+    private static bool FetchVocalAnalysisEnabled()
+    {
+        for (var attempt = 0; attempt < 3; attempt++)
+        {
+            if (attempt > 0) System.Threading.Thread.Sleep(200);
+            try
+            {
+                var json = Http.GetStringAsync(SettingsUrl).GetAwaiter().GetResult();
+                using var doc = JsonDocument.Parse(json);
+                if (doc.RootElement.TryGetProperty("vocal_analysis_enabled", out var v))
+                    return v.ValueKind == JsonValueKind.True;
+                return false;
+            }
+            catch { /* serveur pas encore prêt — on retente */ }
+        }
+        return false;
+    }
+
+    private static void SetVocalAnalysisEnabled(bool enabled, ToolStripMenuItem sender)
+    {
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                var body = JsonSerializer.Serialize(new { vocal_analysis_enabled = enabled });
+                using var content = new StringContent(body, Encoding.UTF8, "application/json");
+                var resp = await Http.PostAsync(SettingsUrl, content);
+                if (resp.IsSuccessStatusCode) return;
+            }
+            catch { /* fallthrough vers le revert */ }
+
+            // sender n'a pas de handle propre (ToolStripItem) — on marshalle via le
+            // ContextMenuStrip propriétaire, qui lui dérive bien de Control. Cast explicite
+            // vers MethodInvoker requis : une lambda ne se convertit pas implicitement en Delegate.
+            sender.Owner?.Invoke((MethodInvoker)(() =>
+            {
+                sender.Checked = !enabled; // revert
+                MessageBox.Show("Impossible de sauvegarder les paramètres.", AppName,
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }));
+        });
+    }
+
+    private void ShowStartupNotification()
+    {
+        _tray.BalloonTipTitle = AppName;
+        _tray.BalloonTipText  = "Serveur démarré — vous pouvez importer des CD depuis RadioStation.";
+        _tray.BalloonTipIcon  = ToolTipIcon.Info;
+        _tray.ShowBalloonTip(4000);
     }
 
     // ── Actions ───────────────────────────────────────────────────────────────
