@@ -6,6 +6,18 @@ set -euo pipefail
 
 ARCH="${1:-x64}"
 NODE_ARCH=$([ "$ARCH" = "arm64" ] && echo "arm64" || echo "x64")
+# Metadata de l'AppImage produite (runtime stub prepend par appimagetool) — suit la cible.
+APPIMAGE_ARCH=$([ "$ARCH" = "arm64" ] && echo "aarch64" || echo "x86_64")
+# Binaire appimagetool lui-même : doit correspondre à la machine qui exécute CE script
+# (runner CI ubuntu-latest = x86_64), pas à la cible — sinon "Exec format error" si on
+# croise runner x86_64 / cible arm64. uname -m: x86_64 | aarch64 | armv7l.
+HOST_ARCH=$(uname -m)
+case "$HOST_ARCH" in
+    x86_64)  APPIMAGETOOL_ARCH="x86_64" ;;
+    aarch64) APPIMAGETOOL_ARCH="aarch64" ;;
+    armv7l|armv6l) APPIMAGETOOL_ARCH="armhf" ;;
+    *) echo "ERREUR : architecture hôte non gérée par appimagetool ($HOST_ARCH)"; exit 1 ;;
+esac
 NODE_VERSION="22.11.0"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -145,15 +157,15 @@ APPRUN
 chmod +x "$APPDIR/AppRun"
 
 # ── 6. AppImage ───────────────────────────────────────────────────────────────
-echo "→ Création AppImage..."
-APPIMAGETOOL="/tmp/appimagetool"
+echo "→ Création AppImage (cible $APPIMAGE_ARCH, outil $APPIMAGETOOL_ARCH)..."
+APPIMAGETOOL="/tmp/appimagetool-$APPIMAGETOOL_ARCH"
 if [ ! -f "$APPIMAGETOOL" ]; then
-    curl -fsSL "https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage" \
+    curl -fsSL "https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-${APPIMAGETOOL_ARCH}.AppImage" \
         -o "$APPIMAGETOOL"
     chmod +x "$APPIMAGETOOL"
 fi
 
-ARCH=x86_64 "$APPIMAGETOOL" --no-appstream "$APPDIR" "$DIST_DIR/RadioStation-CD-Ripper.AppImage"
+ARCH="$APPIMAGE_ARCH" "$APPIMAGETOOL" --no-appstream "$APPDIR" "$DIST_DIR/RadioStation-CD-Ripper.AppImage"
 
 # Nettoyage
 rm -rf "$DIST_DIR/pyinstaller" "$DIST_DIR/pyinstaller-build" "$APPDIR"
