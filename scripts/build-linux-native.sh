@@ -36,20 +36,33 @@ sudo apt-get install -y -qq \
     gir1.2-ayatanaappindicator3-0.1 \
     python3-gi python3-gi-cairo gir1.2-gtk-3.0
 
-# ── 2. PyInstaller — freeze l'app tray Python ─────────────────────────────────
-echo "→ Installation dépendances Python..."
-pip install --quiet -r "$ROOT_DIR/python-tray/requirements.txt" pyinstaller
+# ── 2. Nuitka — compile l'app tray Python en binaire natif ────────────────────
+# PyInstaller embarque du bytecode .pyc dans le binaire — décompilable en source quasi
+# originale (ex. decompyle3). Nuitka compile réellement le contrôle de flux en C puis en
+# machine code (mêmes garanties que backend/verify_license.py ailleurs dans ce projet, cf.
+# .github/workflows/build-deb.yml du repo principal) : le code applicatif n'est plus
+# recouvrable en lisant le binaire (vérifié : `strings` n'y trouve aucune ligne de code
+# source, seulement les littéraux de chaînes attendus dans n'importe quel binaire).
+echo "→ Installation dépendances Python (Nuitka)..."
+pip install --quiet -r "$ROOT_DIR/python-tray/requirements.txt" nuitka ordered-set zstandard
+sudo apt-get install -y -qq patchelf gcc
 
-echo "→ PyInstaller freeze (--onedir)..."
-PYINSTALLER_OUT="$DIST_DIR/pyinstaller"
-rm -rf "$PYINSTALLER_OUT"
-pyinstaller \
-    --onedir \
-    --name radiostation-cd-ripper \
-    --distpath "$PYINSTALLER_OUT" \
-    --workpath "$DIST_DIR/pyinstaller-build" \
-    --noconfirm \
+echo "→ Compilation Nuitka (--standalone, peut prendre plusieurs minutes)..."
+NUITKA_OUT="$DIST_DIR/nuitka"
+rm -rf "$NUITKA_OUT"
+python3 -m nuitka \
+    --standalone \
+    --follow-imports \
+    --include-package=gi \
+    --include-package=pystray \
+    --include-package=PIL \
+    --enable-plugin=gi \
+    --nofollow-import-to=PyQt5 \
+    --lto=no \
+    --output-dir="$NUITKA_OUT" \
+    --output-filename=radiostation-cd-ripper \
     "$ROOT_DIR/python-tray/main.py"
+PY_TRAY_DIST="$NUITKA_OUT/main.dist"
 
 # ── 3. Node.js bundlé ─────────────────────────────────────────────────────────
 echo "→ Téléchargement Node.js $NODE_VERSION ($NODE_ARCH)..."
@@ -67,8 +80,8 @@ echo "→ Assemblage AppDir..."
 rm -rf "$APPDIR"
 mkdir -p "$APPDIR/app" "$APPDIR/bundle"
 
-# App tray Python (PyInstaller --onedir)
-cp -r "$PYINSTALLER_OUT/radiostation-cd-ripper/." "$APPDIR/app/"
+# App tray Python (Nuitka --standalone — exécutable + dépendances à plat, pas de sous-dossier)
+cp -r "$PY_TRAY_DIST/." "$APPDIR/app/"
 
 # Bundle Node.js + code serveur
 cp "$NODE_BIN"               "$APPDIR/bundle/node"
@@ -177,7 +190,7 @@ fi
 ARCH="$APPIMAGE_ARCH" "$APPIMAGETOOL" --no-appstream "$APPDIR" "$DIST_DIR/RadioStation-CD-Ripper.AppImage"
 
 # Nettoyage
-rm -rf "$DIST_DIR/pyinstaller" "$DIST_DIR/pyinstaller-build" "$APPDIR"
+rm -rf "$NUITKA_OUT" "$APPDIR"
 rm -f /tmp/node.tar.gz "/tmp/$NODE_PKG" 2>/dev/null || true
 
 echo ""
