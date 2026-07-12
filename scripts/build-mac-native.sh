@@ -145,12 +145,16 @@ echo "  node_modules après  : $(du -sh "$MODS" | cut -f1)"
 # ── 5. Signature ───────────────────────────────────────────────────────────────
 if [ "${APPLE_CERT_AVAILABLE:-false}" = "true" ]; then
   echo "→ Signature codesign..."
-  # Trouver l'identité Developer ID Application dans le keychain importé
-  SIGNING_IDENTITY=$(security find-identity -v -p codesigning build.keychain \
+  # Trouver l'identité Developer ID Application dans la liste de recherche par défaut —
+  # PAS un keychain nommé "build.keychain" (n'existe pas : release.yml importe le certificat
+  # dans un keychain temporaire ($RUNNER_TEMP/app-signing.keychain-db) qu'il ajoute à la
+  # search list via `security list-keychain -d user -s`, sans le nommer "build.keychain").
+  # Fonctionne aussi en local : recherche alors le login keychain normal de l'utilisateur.
+  SIGNING_IDENTITY=$(security find-identity -v -p codesigning \
     | grep "Developer ID Application" | head -1 | awk '{print $2}')
   if [ -z "$SIGNING_IDENTITY" ]; then
-    echo "ERREUR : aucun certificat 'Developer ID Application' trouvé dans build.keychain"
-    security find-identity -v -p codesigning build.keychain
+    echo "ERREUR : aucun certificat 'Developer ID Application' trouvé dans la search list"
+    security find-identity -v -p codesigning
     exit 1
   fi
   echo "  Identité : $SIGNING_IDENTITY"
