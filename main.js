@@ -62,7 +62,7 @@ try {
 // ============================================================
 
 let ripState = {
-  status: 'idle', // idle | detecting | ripping | analyzing | uploading | done | error
+  status: 'idle', // idle | detecting | ripping | analyzing | trimming | uploading | done | error
   totalTracks: 0,
   currentTrack: 0,
   progress: 0,
@@ -70,7 +70,13 @@ let ripState = {
   filesMetadata: [],
   mbMetadata: null,
   error: null,
+  pendingFiles: undefined, // rempli pendant 'trimming' — cf. _pendingRip
 };
+
+// Fichiers rippés en attente de coupe/upload (statut 'trimming') — vidé par finishRip()
+// (POST /rip/confirm) ou en cas d'erreur. Séparé de ripState pour ne pas exposer filePath/meta
+// complets côté HTTP (ripState.pendingFiles n'expose que name/trackNumber/title).
+let _pendingRip = null;
 
 function sleep(ms) {
   return new Promise(r => setTimeout(r, ms));
@@ -798,6 +804,59 @@ async function getTocWithMb() {
 // Workflow principal
 // ============================================================
 
+// ---- Coupe physique locale (silence/déchet en tête/queue, Phase 2b) ----
+// Appelé une seule fois par piste, avant confirmation d'upload — start_ms/end_ms sont des
+// positions absolues dans le fichier rippé ORIGINAL (pas relatives à un appel /trim précédent).
+function trimWavFile(filePath, startMs, endMs) {
+  return new Promise((resolve, reject) => {
+    const tmpOut = `${filePath}.trim-${Date.now()}.tmp`;
+    const args = ['-y'];
+    if (startMs > 0) args.push('-ss', (startMs / 1000).toFixed(3));
+    args.push('-i', filePath);
+    if (endMs != null && endMs > startMs) args.push('-to', (endMs / 1000).toFixed(3));
+    args.push(tmpOut);
+
+    const proc = spawn(FFMPEG, args);
+    let stderr = '';
+    proc.stderr.on('data', d => { stderr += d.toString(); });
+    proc.on('error', (e) => {
+      try { fs.unlinkSync(tmpOut); } catch { /* rien à nettoyer */ }
+      reject(e);
+    });
+    proc.on('close', (code) => {
+      if (code !== 0 || !fs.existsSync(tmpOut)) {
+        try { fs.unlinkSync(tmpOut); } catch { /* rien à nettoyer */ }
+        reject(new Error(`ffmpeg trim exit ${code}: ${stderr.slice(-300)}`));
+        return;
+      }
+      try {
+        fs.renameSync(tmpOut, filePath);
+        resolve();
+      } catch (e) {
+        reject(e);
+      }
+    });
+  });
+}
+
+function probeLocalDurationSeconds(filePath) {
+  return new Promise((resolve) => {
+    const proc = spawn(FFPROBE, [
+      '-v', 'quiet',
+      '-show_entries', 'format=duration',
+      '-of', 'csv=p=0',
+      filePath,
+    ]);
+    let out = '';
+    proc.stdout.on('data', d => { out += d.toString(); });
+    proc.on('error', () => resolve(null));
+    proc.on('close', () => {
+      const sec = parseFloat(out.trim());
+      resolve(Number.isFinite(sec) ? sec : null);
+    });
+  });
+}
+
 async function doRip(backendUrl, authToken, trackNumbers = null) {
   await quitMusicIfRunning();
 
@@ -885,7 +944,40 @@ async function doRip(backendUrl, authToken, trackNumbers = null) {
       }
     }
 
-    ripState.progress = 85;
+    // ---- Pause : coupe physique locale optionnelle (Phase 2b) ----
+    // La suite (upload) est déclenchée par POST /rip/confirm → finishRip(). rippedPaths
+    // n'est volontairement PAS nettoyé ici (pas de `finally` sur ce try) : les fichiers
+    // restent nécessaires jusqu'à la confirmation.
+    ripState.progress = 90;
+    ripState.status = 'trimming';
+    ripState.pendingFiles = files.map(f => ({
+      name: f.name,
+      trackNumber: f.meta.track_number,
+      title: f.meta.title,
+    }));
+    _pendingRip = { backendUrl, authToken, files, rippedPaths };
+    return;
+
+  } catch (e) {
+    ripState.status = 'error';
+    ripState.error = e.message;
+    console.error('[doRip]', e.message);
+    for (const fpath of rippedPaths) {
+      try { fs.unlinkSync(fpath); } catch { /* ignore */ }
+    }
+  }
+}
+
+// Reprend après la pause 'trimming' (POST /rip/confirm) : upload vers le backend, coupé ou
+// non selon les appels /trim reçus entretemps, puis nettoyage des fichiers temporaires locaux.
+async function finishRip() {
+  if (!_pendingRip) return;
+  const { backendUrl, authToken, files, rippedPaths } = _pendingRip;
+  _pendingRip = null;
+  ripState.pendingFiles = undefined;
+
+  try {
+    ripState.progress = 90;
     ripState.status = 'uploading';
 
     const metaArr = files.map(f => f.meta);
@@ -899,11 +991,10 @@ async function doRip(backendUrl, authToken, trackNumbers = null) {
     ripState.filesMetadata = (upResult.files || []).map(f => f.metadata || {});
     ripState.progress = 100;
     ripState.status = 'done';
-
   } catch (e) {
     ripState.status = 'error';
     ripState.error = e.message;
-    console.error('[doRip]', e.message);
+    console.error('[finishRip]', e.message);
   } finally {
     for (const fpath of rippedPaths) {
       try { fs.unlinkSync(fpath); } catch { /* ignore */ }
@@ -1016,7 +1107,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (req.method === 'POST' && pathname === '/rip') {
-    if (['detecting', 'ripping', 'uploading'].includes(ripState.status)) {
+    if (['detecting', 'ripping', 'analyzing', 'trimming', 'uploading'].includes(ripState.status)) {
       return jsonResp(res, 409, { error: 'Rip déjà en cours' });
     }
     let body = '';
@@ -1032,6 +1123,60 @@ const server = http.createServer(async (req, res) => {
       doRip(backendUrl, authToken, trackNumbers).catch(e => console.error('[rip]', e));
       jsonResp(res, 200, { status: 'started' });
     });
+    return;
+  }
+
+  // ── Coupe physique locale d'une piste rippée (Phase 2b) ──────────────────────
+  // Une seule fois par piste : start_ms/end_ms sont des positions absolues dans le
+  // fichier rippé ORIGINAL, pas relatives à un appel /trim précédent sur la même piste.
+  if (req.method === 'POST' && pathname === '/trim') {
+    if (ripState.status !== 'trimming' || !_pendingRip) {
+      return jsonResp(res, 409, { error: 'Aucune piste en attente de coupe' });
+    }
+    let body = '';
+    req.on('data', c => { body += c; });
+    req.on('end', async () => {
+      let payload = {};
+      try { payload = JSON.parse(body); } catch { /* ignore */ }
+      const trackNumber = Number(payload.track_number);
+      const startMs = Number(payload.start_ms) || 0;
+      const endMs = payload.end_ms != null ? Number(payload.end_ms) : null;
+      const file = _pendingRip?.files.find(f => f.meta.track_number === trackNumber);
+      if (!file) return jsonResp(res, 404, { error: 'Piste inconnue' });
+      try {
+        await trimWavFile(file.filePath, startMs, endMs);
+        const durationSeconds = await probeLocalDurationSeconds(file.filePath);
+        jsonResp(res, 200, { status: 'trimmed', track_number: trackNumber, duration_seconds: durationSeconds });
+      } catch (e) {
+        jsonResp(res, 500, { error: e.message });
+      }
+    });
+    return;
+  }
+
+  // ── Confirmation : reprend le rip en pause (upload) après coupe éventuelle ───
+  if (req.method === 'POST' && pathname === '/rip/confirm') {
+    if (ripState.status !== 'trimming' || !_pendingRip) {
+      return jsonResp(res, 409, { error: 'Aucun rip en attente de confirmation' });
+    }
+    finishRip().catch(e => console.error('[rip/confirm]', e));
+    jsonResp(res, 200, { status: 'confirmed' });
+    return;
+  }
+
+  // ── Préecoute d'une piste déjà rippée (statut 'trimming', avant upload) ──────
+  // Distinct de /preview/:n (préecoute avant rip, relit directement le CD) : ici on sert
+  // le fichier local déjà rippé/coupé, sans re-lecture disque, sans le supprimer après envoi
+  // (il doit rester disponible tant que l'utilisateur ajuste la coupe ou revoit l'aperçu).
+  if (req.method === 'GET' && pathname.startsWith('/rip-preview/')) {
+    const trackNumber = parseInt(pathname.slice('/rip-preview/'.length), 10);
+    const file = _pendingRip?.files.find(f => f.meta.track_number === trackNumber);
+    if (!file || !fs.existsSync(file.filePath)) {
+      return jsonResp(res, 404, { error: 'Piste indisponible' });
+    }
+    const stat = fs.statSync(file.filePath);
+    res.writeHead(200, { 'Content-Type': 'audio/wav', 'Content-Length': stat.size, ...res.corsHeaders });
+    fs.createReadStream(file.filePath).pipe(res);
     return;
   }
 
