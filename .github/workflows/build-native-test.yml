@@ -1,0 +1,80 @@
+name: Build natif (test manuel, non lié aux releases)
+
+# Manuel uniquement — ne se déclenche jamais sur un tag/push, contrairement à release.yml.
+# But : valider que scripts/build-{mac,win,linux}-native.* et les 3 trays (Swift/C#/Python)
+# compilent et tournent réellement en CI avant de remplacer electron-builder dans release.yml
+# (docs/PLAN-CD-RIPPER-NATIF.md, Phase 1, repo principal). Swift et C# n'ont jamais été compilés
+# avant ce workflow (pas de toolchain Xcode/.NET pendant le développement) — artefacts non signés,
+# à inspecter manuellement, jamais publiés en release.
+on:
+  workflow_dispatch:
+
+jobs:
+  build-mac-native:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Build macOS natif (non signé)
+        run: |
+          chmod +x scripts/build-mac-native.sh
+          ./scripts/build-mac-native.sh arm64
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mac-dmg-native
+          path: dist-native/*.dmg
+          retention-days: 7
+
+  build-win-native:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Installer NSIS (makensis)
+        run: choco install nsis -y --no-progress
+
+      - name: Build Windows natif
+        shell: pwsh
+        run: .\scripts\build-win-native.ps1
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: win-exe-native
+          path: dist-native/*.exe
+          retention-days: 7
+
+  build-linux-native:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Build Linux natif
+        run: |
+          chmod +x scripts/build-linux-native.sh
+          ./scripts/build-linux-native.sh x64
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-appimage-native
+          path: dist-native/*.AppImage
+          retention-days: 7
