@@ -30,6 +30,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         startNodeServer()
         buildStatusItem()
         sendStartupNotification()
+
+        // Appairage autonome (Phase 2c) : radiostation-cdripper://pair?server=…&code=…
+        // reçu comme Apple Event standard (kAEGetURL) — mécanisme historique AppKit pour les
+        // schémas d'URL personnalisés, fonctionne que l'app soit déjà lancée ou non.
+        NSAppleEventManager.shared().setEventHandler(
+            self,
+            andSelector: #selector(handleGetURLEvent(_:withReplyEvent:)),
+            forEventClass: AEEventClass(kInternetEventClass),
+            andEventID: AEEventID(kAEGetURL)
+        )
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -236,6 +246,62 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    // MARK: — Appairage autonome (Phase 2c)
+
+    @objc private func handleGetURLEvent(_ event: NSAppleEventDescriptor, withReplyEvent replyEvent: NSAppleEventDescriptor) {
+        guard let urlString = event.paramDescriptor(forKeyword: AEKeyword(keyDirectObject))?.stringValue,
+              let url = URL(string: urlString) else { return }
+        handlePairingURL(url)
+    }
+
+    private func handlePairingURL(_ url: URL) {
+        guard let comps = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              let server = comps.queryItems?.first(where: { $0.name == "server" })?.value,
+              let code = comps.queryItems?.first(where: { $0.name == "code" })?.value,
+              let exchangeURL = URL(string: "\(server)/api/importer/cd-ripper/pair/exchange") else { return }
+
+        var request = URLRequest(url: exchangeURL)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let body: [String: Any] = ["code": code, "platform": "darwin", "label": Host.current().localizedName ?? "Mac"]
+        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+
+        URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+            guard let self else { return }
+            guard error == nil, (response as? HTTPURLResponse)?.statusCode == 200,
+                  let data, let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let deviceToken = json["device_token"] as? String else {
+                DispatchQueue.main.async { self.notifyPairingResult(success: false) }
+                return
+            }
+            // Le serveur node tourne en process séparé (spawné, pas require() direct comme
+            // Electron) — seul son propre endpoint /settings peut écrire settings.json.
+            self.storeDeviceToken(server: server, token: deviceToken) { ok in
+                DispatchQueue.main.async { self.notifyPairingResult(success: ok) }
+            }
+        }.resume()
+    }
+
+    private func storeDeviceToken(server: String, token: String, completion: @escaping (Bool) -> Void) {
+        var request = URLRequest(url: Self.settingsURL)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try? JSONSerialization.data(withJSONObject: ["server_url": server, "device_token": token])
+        URLSession.shared.dataTask(with: request) { _, response, error in
+            completion(error == nil && (response as? HTTPURLResponse)?.statusCode == 200)
+        }.resume()
+    }
+
+    private func notifyPairingResult(success: Bool) {
+        let center = UNUserNotificationCenter.current()
+        let content = UNMutableNotificationContent()
+        content.title = "RadioStation CD Ripper"
+        content.body = success
+            ? "Application connectée à RadioStation."
+            : "Échec de la connexion — réessayez depuis la page web."
+        center.add(UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))
+    }
+
     // MARK: — Serveur Node.js
 
     private func startNodeServer() {
@@ -249,9 +315,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         process.arguments = [mainJs]
         // cwd = Resources/ pour que require('ffmpeg-static') trouve node_modules/
         process.currentDirectoryURL = Bundle.main.resourceURL
-        process.environment = ProcessInfo.processInfo.environment.merging(
-            ["ELECTRON_RUN": "1"], uniquingKeysWith: { $1 }
-        )
 
         // Log dans ~/Library/Caches/fr.radiostation.cd-ripper/server.log
         let logDir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]

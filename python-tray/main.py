@@ -4,11 +4,13 @@
 import json
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -79,7 +81,6 @@ def _start_node_server():
         return  # Node introuvable — le serveur ne démarrera pas
 
     env = os.environ.copy()
-    env["ELECTRON_RUN"] = "1"
 
     # Log dans ~/.cache/fr.radiostation.cd-ripper/server.log
     log_dir = Path.home() / ".cache" / BUNDLE_ID
@@ -148,6 +149,124 @@ def _fetch_vocal_analysis_enabled() -> bool:
             return bool(data.get("vocal_analysis_enabled"))
     except (urllib.error.URLError, OSError, ValueError):
         return False
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Appairage autonome (Phase 2c) — radiostation-cdripper://pair?server=…&code=…
+#
+# Linux n'a pas d'équivalent OS natif à second-instance (Windows)/open-url (macOS) : le
+# gestionnaire de MimeType x-scheme-handler relance un nouveau process avec le lien en argv à
+# chaque clic. Single-instance + relais du lien vers le process déjà lancé implémentés ici via
+# un socket Unix (le lock/écoute échoue si une instance tourne déjà -> on relaie et on quitte).
+# ─────────────────────────────────────────────────────────────────────────────
+
+_PAIRING_SOCKET_PATH = Path.home() / ".cache" / BUNDLE_ID / "pairing.sock"
+
+
+def _extract_pairing_url(argv) -> "str | None":
+    for arg in argv:
+        if arg.startswith("radiostation-cdripper://"):
+            return arg
+    return None
+
+
+def _handle_pairing_url(url: str, icon=None):
+    parsed = urllib.parse.urlparse(url)
+    qs = urllib.parse.parse_qs(parsed.query)
+    server = (qs.get("server") or [None])[0]
+    code = (qs.get("code") or [None])[0]
+    if not server or not code:
+        return
+
+    def _notify(success: bool):
+        if icon is None:
+            return
+        try:
+            icon.notify(
+                "Application connectée à RadioStation." if success
+                else "Échec de la connexion — réessayez depuis la page web.",
+                APP_NAME,
+            )
+        except Exception:
+            pass
+
+    try:
+        body = json.dumps({"code": code, "platform": "linux", "label": socket.gethostname()}).encode("utf-8")
+        req = urllib.request.Request(
+            f"{server}/api/importer/cd-ripper/pair/exchange", data=body, method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            device_token = json.loads(resp.read().decode("utf-8"))["device_token"]
+
+        # Le serveur node tourne en process séparé — seul son propre endpoint /settings peut
+        # écrire settings.json (pas d'accès direct comme un import Python in-process).
+        store_body = json.dumps({"server_url": server, "device_token": device_token}).encode("utf-8")
+        store_req = urllib.request.Request(
+            SETTINGS_URL, data=store_body, method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        urllib.request.urlopen(store_req, timeout=2)
+        _notify(True)
+    except (urllib.error.URLError, OSError, KeyError, ValueError):
+        _notify(False)
+
+
+def _try_claim_pairing_socket() -> "socket.socket | None":
+    """Tente de devenir la 1ère instance (bind du socket Unix). `None` si une instance tourne
+    déjà (bind refusé) — l'appelant doit alors relayer le lien via `_relay_pairing_url_to_running_instance`
+    et quitter sans démarrer le serveur node ni le tray."""
+    _PAIRING_SOCKET_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        srv.bind(str(_PAIRING_SOCKET_PATH))
+    except OSError:
+        # Le socket existe déjà : soit une instance l'occupe (bind légitimement refusé), soit
+        # c'est un fichier orphelin d'un crash précédent — on vérifie en tentant une connexion.
+        try:
+            probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            probe.settimeout(0.5)
+            probe.connect(str(_PAIRING_SOCKET_PATH))
+            probe.close()
+            srv.close()
+            return None  # une instance répond bien — on n'est pas la 1ère
+        except OSError:
+            pass  # personne ne répond — fichier orphelin, on le remplace et on re-tente
+        try:
+            _PAIRING_SOCKET_PATH.unlink()
+            srv.bind(str(_PAIRING_SOCKET_PATH))
+        except OSError:
+            srv.close()
+            return None
+
+    srv.listen(4)
+    return srv
+
+
+def _serve_pairing_socket(srv: "socket.socket", icon):
+    def _accept_loop():
+        while True:
+            try:
+                conn, _ = srv.accept()
+                with conn:
+                    data = conn.recv(4096).decode("utf-8", errors="ignore").strip()
+                if data:
+                    _handle_pairing_url(data, icon)
+            except OSError:
+                break
+
+    threading.Thread(target=_accept_loop, daemon=True).start()
+
+
+def _relay_pairing_url_to_running_instance(url: str):
+    try:
+        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        client.settimeout(2)
+        client.connect(str(_PAIRING_SOCKET_PATH))
+        client.sendall(url.encode("utf-8"))
+        client.close()
+    except OSError:
+        pass  # instance existante injoignable — abandon silencieux
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Menu et tray
@@ -223,9 +342,26 @@ def _on_ready(icon):
 
 
 def main():
+    pairing_url = _extract_pairing_url(sys.argv[1:])
+
+    # Single-instance AVANT tout le reste (serveur node, tray) — si une instance tourne déjà,
+    # on relaie juste le lien reçu (le cas échéant) et on quitte sans rien démarrer d'autre.
+    pairing_socket = _try_claim_pairing_socket()
+    if pairing_socket is None:
+        if pairing_url:
+            _relay_pairing_url_to_running_instance(pairing_url)
+        return
+
     _start_node_server()
     icon = pystray.Icon(BUNDLE_ID, make_icon(), APP_NAME, _build_menu())
-    icon.run(setup=_on_ready)
+
+    def _on_ready_with_pairing(icon):
+        _on_ready(icon)
+        _serve_pairing_socket(pairing_socket, icon)
+        if pairing_url:
+            threading.Thread(target=_handle_pairing_url, args=(pairing_url, icon), daemon=True).start()
+
+    icon.run(setup=_on_ready_with_pairing)
 
 
 if __name__ == "__main__":

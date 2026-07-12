@@ -2,9 +2,11 @@ using System;
 using System.Diagnostics;
 using System.Drawing;
 using System.IO;
+using System.IO.Pipes;
 using System.Net.Http;
 using System.Text;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 using Microsoft.Win32;
@@ -17,12 +19,40 @@ namespace RadioStationCDRipper;
 
 static class Program
 {
+    // Appairage autonome (Phase 2c) : Windows relance l'exe avec le lien
+    // radiostation-cdripper://... en argument (enregistré via installer.nsi) — pas d'event
+    // dédié comme macOS/open-url. Un Mutex nommé assure une seule instance ; la 2e invocation
+    // transmet le lien à la 1ère via named pipe puis se termine immédiatement.
+    private const string MutexName = "Global\\RadioStationCDRipperSingleInstance";
+    internal const string PipeName = "RadioStationCDRipperPairingPipe";
+
     [STAThread]
-    static void Main()
+    static void Main(string[] args)
     {
+        var pairingUrl = Array.Find(args, a => a.StartsWith("radiostation-cdripper://", StringComparison.OrdinalIgnoreCase));
+
+        using var mutex = new Mutex(initiallyOwned: true, MutexName, out var isFirstInstance);
+        if (!isFirstInstance)
+        {
+            if (pairingUrl != null) SendPairingUrlToRunningInstance(pairingUrl);
+            return;
+        }
+
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
-        Application.Run(new TrayApp());
+        Application.Run(new TrayApp(pairingUrl));
+    }
+
+    private static void SendPairingUrlToRunningInstance(string url)
+    {
+        try
+        {
+            using var client = new NamedPipeClientStream(".", PipeName, PipeDirection.Out);
+            client.Connect(2000);
+            using var writer = new StreamWriter(client) { AutoFlush = true };
+            writer.WriteLine(url);
+        }
+        catch { /* instance existante injoignable — abandon silencieux */ }
     }
 }
 
@@ -45,7 +75,7 @@ class TrayApp : ApplicationContext
     // Pas "const" : une chaîne interpolée avec un placeholder int n'est pas une constante de compilation en C#.
     private static readonly string SettingsUrl = $"http://127.0.0.1:{Port}/settings";
 
-    public TrayApp()
+    public TrayApp(string? startupPairingUrl)
     {
         _tray = new NotifyIcon
         {
@@ -60,6 +90,9 @@ class TrayApp : ApplicationContext
         StartNodeServer();
         _tray.ContextMenuStrip = BuildMenu();
         ShowStartupNotification();
+
+        StartPairingPipeServer();
+        if (startupPairingUrl != null) _ = HandlePairingUrlAsync(startupPairingUrl);
     }
 
     // ── Menu ─────────────────────────────────────────────────────────────────
@@ -155,7 +188,6 @@ class TrayApp : ApplicationContext
             RedirectStandardOutput = true,
             RedirectStandardError  = true,
         };
-        psi.Environment["ELECTRON_RUN"] = "1";
 
         var process = new Process { StartInfo = psi, EnableRaisingEvents = true };
 
@@ -285,6 +317,83 @@ class TrayApp : ApplicationContext
                     MessageBoxButtons.OK, MessageBoxIcon.Error);
             }));
         });
+    }
+
+    // ── Appairage autonome (Phase 2c) ─────────────────────────────────────────
+
+    private void StartPairingPipeServer()
+    {
+        _ = Task.Run(async () =>
+        {
+            while (true)
+            {
+                try
+                {
+                    using var server = new NamedPipeServerStream(Program.PipeName, PipeDirection.In);
+                    await server.WaitForConnectionAsync();
+                    using var reader = new StreamReader(server);
+                    var url = await reader.ReadLineAsync();
+                    if (!string.IsNullOrEmpty(url)) await HandlePairingUrlAsync(url);
+                }
+                catch { /* pipe cassé/instance en cours de fermeture — on relance la boucle */ }
+            }
+        });
+    }
+
+    private async Task HandlePairingUrlAsync(string pairingUrl)
+    {
+        Uri uri;
+        try { uri = new Uri(pairingUrl); } catch { return; }
+        // System.Web.HttpUtility n'est pas disponible hors ASP.NET/.NET Framework — parsing
+        // manuel de la query string (pas de dépendance NuGet supplémentaire pour si peu).
+        var query = ParseQueryString(uri.Query);
+        query.TryGetValue("server", out var server);
+        query.TryGetValue("code", out var code);
+        if (string.IsNullOrEmpty(server) || string.IsNullOrEmpty(code)) return;
+
+        try
+        {
+            var body = JsonSerializer.Serialize(new { code, platform = "win32", label = Environment.MachineName });
+            using var content = new StringContent(body, Encoding.UTF8, "application/json");
+            using var resp = await Http.PostAsync($"{server}/api/importer/cd-ripper/pair/exchange", content);
+            if (!resp.IsSuccessStatusCode) throw new Exception($"HTTP {(int)resp.StatusCode}");
+            var json = await resp.Content.ReadAsStringAsync();
+            using var doc = JsonDocument.Parse(json);
+            var deviceToken = doc.RootElement.GetProperty("device_token").GetString();
+
+            // Le serveur node tourne en process séparé — seul son propre endpoint /settings
+            // peut écrire settings.json (pas d'accès direct comme un require() in-process).
+            var storeBody = JsonSerializer.Serialize(new { server_url = server, device_token = deviceToken });
+            using var storeContent = new StringContent(storeBody, Encoding.UTF8, "application/json");
+            await Http.PostAsync(SettingsUrl, storeContent);
+
+            NotifyPairingResult(true);
+        }
+        catch
+        {
+            NotifyPairingResult(false);
+        }
+    }
+
+    private static System.Collections.Generic.Dictionary<string, string> ParseQueryString(string query)
+    {
+        var result = new System.Collections.Generic.Dictionary<string, string>();
+        foreach (var pair in query.TrimStart('?').Split('&', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var parts = pair.Split('=', 2);
+            if (parts.Length == 2) result[Uri.UnescapeDataString(parts[0])] = Uri.UnescapeDataString(parts[1]);
+        }
+        return result;
+    }
+
+    private void NotifyPairingResult(bool success)
+    {
+        _tray.BalloonTipTitle = AppName;
+        _tray.BalloonTipText = success
+            ? "Application connectée à RadioStation."
+            : "Échec de la connexion — réessayez depuis la page web.";
+        _tray.BalloonTipIcon = success ? ToolTipIcon.Info : ToolTipIcon.Error;
+        _tray.ShowBalloonTip(4000);
     }
 
     private void ShowStartupNotification()

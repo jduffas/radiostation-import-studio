@@ -132,14 +132,18 @@ draw.ellipse((112, 112, 144, 144), fill=(15, 76, 117))
 img.save("$APPDIR/radiostation-cd-ripper.png")
 PYICON
 
-# .desktop
+# .desktop — %u transmet le lien radiostation-cdripper://... en argv (appairage, Phase 2c).
+# L'intégration MIME d'une AppImage dépend de l'installation (appimaged, associations
+# manuelles) — pas garantie out-of-the-box sur toutes les distros, best-effort comme le reste
+# de la distribution AppImage.
 cat > "$APPDIR/radiostation-cd-ripper.desktop" << 'DESKTOP'
 [Desktop Entry]
 Type=Application
 Name=RadioStation CD Ripper
-Exec=radiostation-cd-ripper
+Exec=radiostation-cd-ripper %u
 Icon=radiostation-cd-ripper
 Categories=AudioVideo;Audio;
+MimeType=x-scheme-handler/radiostation-cdripper;
 DESKTOP
 
 # AppRun — point d'entrée de l'AppImage
@@ -160,7 +164,12 @@ chmod +x "$APPDIR/AppRun"
 echo "→ Création AppImage (cible $APPIMAGE_ARCH, outil $APPIMAGETOOL_ARCH)..."
 APPIMAGETOOL="/tmp/appimagetool-$APPIMAGETOOL_ARCH"
 if [ ! -f "$APPIMAGETOOL" ]; then
-    curl -fsSL "https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-${APPIMAGETOOL_ARCH}.AppImage" \
+    # Repo AppImage/appimagetool (pas l'ancien AppImageKit, dont le build continuous 2023 a un
+    # faux-positif de détection d'archi sur aarch64 : confondu par la coexistence de binaires
+    # ELF tagués ABI "GNU/Linux" (node, ffmpeg, libs glibc) et non tagués dans le même AppDir,
+    # erreur "More than one architectures were found" même avec ARCH= fourni explicitement.
+    # Testé réellement (12 juillet 2026) : reproduit avec l'ancien binaire, résolu avec celui-ci.
+    curl -fsSL "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-${APPIMAGETOOL_ARCH}.AppImage" \
         -o "$APPIMAGETOOL"
     chmod +x "$APPIMAGETOOL"
 fi

@@ -56,6 +56,17 @@ cat > "$APP_BUNDLE/Contents/Info.plist" << 'PLIST'
     <string>12.0</string>
     <key>NSHumanReadableCopyright</key>
     <string>RadioStation</string>
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key>
+            <string>fr.radiostation.cd-ripper.pairing</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>radiostation-cdripper</string>
+            </array>
+        </dict>
+    </array>
 </dict>
 </plist>
 PLIST
@@ -167,6 +178,22 @@ hdiutil create -volname "$APP_NAME" \
   -srcfolder "$APP_BUNDLE" \
   -ov -format UDZO \
   "$DMG_PATH"
+
+# ── 7. Notarisation (remplace le hook afterSign d'electron-builder + @electron/notarize) ───────
+# Ignorée si les identifiants Apple ne sont pas fournis (build local sans compte développeur) ou
+# si l'app n'a pas été signée avec un vrai Developer ID (APPLE_CERT_AVAILABLE != true ci-dessus).
+if [ "${APPLE_CERT_AVAILABLE:-false}" = "true" ] && [ -n "${APPLE_ID:-}" ] && [ -n "${APPLE_APP_SPECIFIC_PASSWORD:-}" ] && [ -n "${APPLE_TEAM_ID:-}" ]; then
+  echo "→ Notarisation (xcrun notarytool)..."
+  xcrun notarytool submit "$DMG_PATH" \
+    --apple-id "$APPLE_ID" \
+    --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+    --team-id "$APPLE_TEAM_ID" \
+    --wait
+  echo "→ Stapling du ticket de notarisation..."
+  xcrun stapler staple "$DMG_PATH"
+else
+  echo "→ Notarisation ignorée (identifiants Apple absents)"
+fi
 
 echo ""
 echo "✓ Build terminé : $DMG_PATH"

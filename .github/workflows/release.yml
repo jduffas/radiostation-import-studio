@@ -20,8 +20,6 @@ jobs:
           node-version: '22'
           cache: 'npm'
 
-      - run: npm ci
-
       - name: Importer le certificat dans le keychain
         run: |
           CERT_PATH=$RUNNER_TEMP/certificate.p12
@@ -46,18 +44,20 @@ jobs:
           fi
           echo "OK : $IDENTITIES identité(s) Developer ID Application trouvée(s)"
 
-      - name: Build macOS (.dmg)
+      - name: Build macOS natif (.dmg, signé + notarisé)
         env:
+          APPLE_CERT_AVAILABLE: 'true'
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          CSC_KEY_PASSWORD: ${{ secrets.MAC_CERT_PASSWORD }}
-        run: npx electron-builder --mac --arm64 --publish never
+        run: |
+          chmod +x scripts/build-mac-native.sh
+          ./scripts/build-mac-native.sh arm64
 
       - uses: actions/upload-artifact@v4
         with:
           name: mac-dmg
-          path: dist/*.dmg
+          path: dist-native/*.dmg
           retention-days: 1
 
   build-win:
@@ -70,15 +70,21 @@ jobs:
           node-version: '22'
           cache: 'npm'
 
-      - run: npm ci
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
 
-      - name: Build Windows (.exe)
-        run: npx electron-builder --win --x64 --publish never
+      - name: Installer NSIS (makensis)
+        run: choco install nsis -y --no-progress
+
+      - name: Build Windows natif (.exe)
+        shell: pwsh
+        run: .\scripts\build-win-native.ps1
 
       - uses: actions/upload-artifact@v4
         with:
           name: win-exe
-          path: dist/*.exe
+          path: dist-native/*.exe
           retention-days: 1
 
   build-linux:
@@ -91,15 +97,15 @@ jobs:
           node-version: '22'
           cache: 'npm'
 
-      - run: npm ci
-
-      - name: Build Linux (.AppImage)
-        run: npx electron-builder --linux --x64 --publish never
+      - name: Build Linux natif (.AppImage)
+        run: |
+          chmod +x scripts/build-linux-native.sh
+          ./scripts/build-linux-native.sh x64
 
       - uses: actions/upload-artifact@v4
         with:
           name: linux-appimage
-          path: dist/*.AppImage
+          path: dist-native/*.AppImage
           retention-days: 1
 
   release:
@@ -117,7 +123,8 @@ jobs:
           body: |
             ## RadioStation CD Ripper ${{ github.ref_name }}
 
-            Application autonome pour importer des CD audio dans RadioStation.
+            Application autonome pour importer des CD audio dans RadioStation — coquille native
+            par OS (Swift/AppKit, C#/WinForms, Python/pystray), `main.js` (Node) partagé.
 
             ### Téléchargement
             - **macOS** : `.dmg` — glisser l'app dans Applications

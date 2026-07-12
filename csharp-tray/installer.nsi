@@ -38,6 +38,13 @@ Section "Install"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\RadioStationCDRipper" \
               "UninstallString" "$INSTDIR\uninstall.exe"
 
+  ; Schéma d'URL radiostation-cdripper:// (appairage autonome, Phase 2c) — équivalent Windows
+  ; du CFBundleURLTypes macOS / protocols electron-builder retirés avec Electron.
+  WriteRegStr HKCU "Software\Classes\radiostation-cdripper" "" "URL:RadioStation CD Ripper Pairing"
+  WriteRegStr HKCU "Software\Classes\radiostation-cdripper" "URL Protocol" ""
+  WriteRegStr HKCU "Software\Classes\radiostation-cdripper\shell\open\command" "" \
+              '"$INSTDIR\RadioStationCDRipper.exe" "%1"'
+
   ; Lancer l'application après installation
   Exec "$INSTDIR\RadioStationCDRipper.exe"
 SectionEnd
@@ -58,4 +65,5 @@ Section "Uninstall"
   ; Nettoyer le registre
   DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "RadioStationCDRipper"
   DeleteRegKey   HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\RadioStationCDRipper"
+  DeleteRegKey   HKCU "Software\Classes\radiostation-cdripper"
 SectionEnd

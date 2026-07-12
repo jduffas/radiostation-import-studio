@@ -1069,7 +1069,7 @@ const server = http.createServer(async (req, res) => {
       ok: true, ...cd,
       platform: PLATFORM,
       bundledFfmpeg: BUNDLED_FFMPEG,
-      version: '1.2',
+      version: '1.3',
     });
   }
 
@@ -1295,7 +1295,14 @@ const server = http.createServer(async (req, res) => {
     req.on('end', () => {
       let payload = {};
       try { payload = JSON.parse(body); } catch { /* ignore */ }
-      const s = saveSettings({ vocal_analysis_enabled: !!payload.vocal_analysis_enabled });
+      // Les trays natifs (Swift/C#/Python) spawnent ce serveur en process séparé — cet endpoint
+      // HTTP est leur seul moyen d'écrire dans settings.json, y compris pour stocker
+      // server_url/device_token après un appairage (Phase 2c) — pas seulement vocal_analysis_enabled.
+      const updates = {};
+      if (payload.vocal_analysis_enabled !== undefined) updates.vocal_analysis_enabled = !!payload.vocal_analysis_enabled;
+      if (payload.server_url !== undefined) updates.server_url = String(payload.server_url);
+      if (payload.device_token !== undefined) updates.device_token = String(payload.device_token);
+      const s = saveSettings(updates);
       jsonResp(res, 200, s);
     });
     return;
@@ -1309,10 +1316,7 @@ const server = http.createServer(async (req, res) => {
 // ============================================================
 
 server.listen(PORT, '127.0.0.1', () => {
-  console.log(`RadioStation CD Ripper v1.2 — http://127.0.0.1:${PORT}`);
+  console.log(`RadioStation CD Ripper v1.3 — http://127.0.0.1:${PORT}`);
   console.log(`Plateforme : ${PLATFORM} | ffmpeg bundlé : ${BUNDLED_FFMPEG}`);
   if (PLATFORM === 'win32') console.log(`Lecteur CD : ${getCdDevice()}`);
 });
-
-// Exports pour electron-main.js (settings partagés dans le même processus)
-module.exports = { loadSettings, saveSettings };
