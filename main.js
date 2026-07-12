@@ -299,6 +299,7 @@ function ripTrackAfconvert(trackFilePath, outPath) {
     const proc = spawn('afconvert', ['-f', 'WAVE', '-d', 'LEI16@44100', trackFilePath, outPath]);
     let stderr = '';
     proc.stderr.on('data', d => { stderr += d; });
+    proc.on('error', reject);
     proc.on('close', code => {
       if (code === 0 && fs.existsSync(outPath)) resolve();
       else reject(new Error(`afconvert exit ${code}: ${stderr.slice(-200)}`));
@@ -405,6 +406,7 @@ function ripTrackDd(device, startSector, sectorCount, outPath) {
                                '-i', 'pipe:0', '-f', 'wav', outPath]);
     dd.stdout.pipe(ff.stdin);
     dd.on('error', err => { try { ff.stdin.destroy(); } catch {} reject(err); });
+    ff.on('error', err => { try { dd.kill(); } catch {} reject(err); });
     let ffStderr = '';
     ff.stderr.on('data', d => { ffStderr += d; });
     ff.on('close', code => {
@@ -642,6 +644,7 @@ function ripTrackCdparanoia(trackNum, outPath) {
     const proc = spawn('cdparanoia', [String(trackNum), outPath]);
     let stderr = '';
     proc.stderr.on('data', d => { stderr += d; });
+    proc.on('error', reject);
     proc.on('close', code => {
       if (code === 0 && fs.existsSync(outPath)) resolve();
       else reject(new Error(`cdparanoia exit ${code}: ${stderr.slice(-300)}`));
@@ -656,6 +659,7 @@ function ripTrackFfmpeg(trackNum, outPath) {
     const proc = spawn(FFMPEG, args);
     let stderr = '';
     proc.stderr.on('data', d => { stderr += d; });
+    proc.on('error', reject);
     proc.on('close', code => {
       if (code === 0 && fs.existsSync(outPath)) resolve();
       else reject(new Error(`ffmpeg exit ${code}: ${stderr.slice(-300)}`));
@@ -700,7 +704,8 @@ async function ripTrack(trackNum, outPath, toc = null) {
     try {
       return await ripTrackCdparanoia(trackNum, outPath);
     } catch (e) {
-      if (e.message.includes('exit 127') || e.message.includes('not found')) {
+      // spawn() (pas de shell) émet ENOENT si le binaire est absent — pas "exit 127"
+      if (e.code === 'ENOENT' || e.message.includes('exit 127') || e.message.includes('not found')) {
         return ripTrackFfmpeg(trackNum, outPath);
       }
       throw e;
@@ -910,25 +915,57 @@ async function doRip(backendUrl, authToken, trackNumbers = null) {
 // Serveur HTTP
 // ============================================================
 
-const CORS_HEADERS = {
-  'Access-Control-Allow-Origin': '*',
+const CORS_BASE_HEADERS = {
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
   'Access-Control-Allow-Headers': 'Content-Type, Authorization',
 };
+
+// Le serveur écoute sur 127.0.0.1 mais un CORS wildcard laissait n'importe
+// quelle page web ouverte dans le même navigateur déclencher /rip (avec son
+// propre backend_url) et exfiltrer l'audio ripé — CSRF classique "serveur
+// localhost". On restreint aux origines LAN/localhost, seul déploiement
+// légitime du frontend RadioStation.
+function isAllowedOrigin(origin) {
+  if (!origin) return true; // appels non-navigateur (curl, diagnostics)
+  // Déploiement avec domaine public configuré explicitement (hors LAN)
+  if (process.env.RADIOSTATION_URL) {
+    try { if (new URL(process.env.RADIOSTATION_URL).origin === origin) return true; } catch { /* ignore */ }
+  }
+  let hostname;
+  try { hostname = new URL(origin).hostname; } catch { return false; }
+  if (hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1') return true;
+  if (/^10\.\d+\.\d+\.\d+$/.test(hostname)) return true;
+  if (/^192\.168\.\d+\.\d+$/.test(hostname)) return true;
+  const m172 = hostname.match(/^172\.(\d+)\.\d+\.\d+$/);
+  if (m172 && +m172[1] >= 16 && +m172[1] <= 31) return true;
+  return false;
+}
+
+function buildCorsHeaders(origin) {
+  return { ...CORS_BASE_HEADERS, 'Access-Control-Allow-Origin': origin || '*' };
+}
 
 function jsonResp(res, status, data) {
   const body = JSON.stringify(data);
   res.writeHead(status, {
     'Content-Type': 'application/json',
     'Content-Length': Buffer.byteLength(body),
-    ...CORS_HEADERS,
+    ...(res.corsHeaders || buildCorsHeaders(null)),
   });
   res.end(body);
 }
 
 const server = http.createServer(async (req, res) => {
+  const origin = req.headers.origin;
+  if (origin && !isAllowedOrigin(origin)) {
+    res.writeHead(403, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Origin non autorisée' }));
+    return;
+  }
+  res.corsHeaders = buildCorsHeaders(origin);
+
   if (req.method === 'OPTIONS') {
-    res.writeHead(204, CORS_HEADERS);
+    res.writeHead(204, res.corsHeaders);
     res.end();
     return;
   }
@@ -1025,7 +1062,7 @@ const server = http.createServer(async (req, res) => {
 
     const sendWavFile = (filePath) => {
       const stat = fs.statSync(filePath);
-      res.writeHead(200, { 'Content-Type': 'audio/wav', 'Content-Length': stat.size, ...CORS_HEADERS });
+      res.writeHead(200, { 'Content-Type': 'audio/wav', 'Content-Length': stat.size, ...res.corsHeaders });
       const rs = fs.createReadStream(filePath);
       rs.pipe(res);
       const cleanup = () => { try { fs.unlinkSync(filePath); } catch {} };
@@ -1058,9 +1095,21 @@ const server = http.createServer(async (req, res) => {
           const dd = spawn('dd', [`if=${device}`, 'bs=2352', `skip=${start}`, `count=${count}`]);
           const ff = spawn(FFMPEG, ['-y', '-f', 's16le', '-ar', '44100', '-ac', '2', '-i', 'pipe:0', '-f', 'wav', 'pipe:1']);
           dd.stdout.pipe(ff.stdin);
+          let ffHeaderSent = false;
           dd.on('error', () => { try { ff.stdin.destroy(); } catch {} });
-          res.writeHead(200, { 'Content-Type': 'audio/wav', ...CORS_HEADERS });
-          ff.stdout.pipe(res);
+          ff.on('error', (e) => {
+            try { dd.kill(); } catch {}
+            if (!ffHeaderSent) return jsonResp(res, 500, { error: e.message });
+            try { res.end(); } catch {}
+          });
+          ff.stdout.on('data', chunk => {
+            if (!ffHeaderSent) {
+              res.writeHead(200, { 'Content-Type': 'audio/wav', ...res.corsHeaders });
+              ffHeaderSent = true;
+            }
+            res.write(chunk);
+          });
+          ff.on('close', () => res.end());
           res.on('close', () => { try { dd.kill(); } catch {} try { ff.kill(); } catch {} });
           return;
         }
@@ -1074,7 +1123,7 @@ const server = http.createServer(async (req, res) => {
     let ffHeaderSent = false;
     ff.stdout.on('data', chunk => {
       if (!ffHeaderSent) {
-        res.writeHead(200, { 'Content-Type': 'audio/wav', ...CORS_HEADERS });
+        res.writeHead(200, { 'Content-Type': 'audio/wav', ...res.corsHeaders });
         ffHeaderSent = true;
       }
       res.write(chunk);
