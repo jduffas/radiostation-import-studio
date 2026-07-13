@@ -37,6 +37,8 @@ APP_NAME     = "RadioStation CD Ripper"
 PORT         = 19847
 BUNDLE_ID    = "fr.radiostation.cd-ripper"
 SETTINGS_URL = f"http://127.0.0.1:{PORT}/settings"
+STATUS_URL   = f"http://127.0.0.1:{PORT}/status"
+UPDATE_CHECK_URL = f"http://127.0.0.1:{PORT}/update-check"
 
 _frozen = getattr(sys, "frozen", False)
 _here   = Path(sys.executable if _frozen else __file__).resolve().parent
@@ -301,15 +303,18 @@ def _relay_pairing_url_to_running_instance(url: str):
 # Menu et tray
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _open_browser(icon, item):
+def _fetch_paired_server_url():
     # `server_url` vient de l'appairage (stocké dans settings.json par ce même endpoint) —
     # plus de saisie manuelle d'adresse côté tray.
     try:
         with urllib.request.urlopen(SETTINGS_URL, timeout=1) as resp:
-            server_url = json.loads(resp.read().decode("utf-8")).get("server_url")
+            return json.loads(resp.read().decode("utf-8")).get("server_url")
     except (urllib.error.URLError, OSError, ValueError):
-        server_url = None
+        return None
 
+
+def _open_browser(icon, item):
+    server_url = _fetch_paired_server_url()
     if not server_url:
         try:
             icon.notify("Application non appairée — connectez-la d'abord depuis le site.", APP_NAME)
@@ -324,6 +329,71 @@ def _toggle_login(icon, item):
     icon.menu = _build_menu()
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Vérification de mise à jour (GET /update-check, cf. main.js)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _fetch_app_version() -> str:
+    """Lecture best-effort de la version installée — quelques tentatives courtes, même pattern
+    que les autres lectures au tout premier affichage du menu (le serveur node vient de
+    démarrer, course possible)."""
+    for attempt in range(3):
+        if attempt > 0:
+            time.sleep(0.2)
+        try:
+            with urllib.request.urlopen(STATUS_URL, timeout=1) as resp:
+                version = json.loads(resp.read().decode("utf-8")).get("version")
+                if version:
+                    return version
+        except (urllib.error.URLError, OSError, ValueError):
+            pass
+    return "?"
+
+
+def _fetch_update_check():
+    """Retourne (current_version, latest_version, update_available) ou None si injoignable."""
+    try:
+        with urllib.request.urlopen(f"{UPDATE_CHECK_URL}?force=true", timeout=8) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            return data.get("current_version"), data.get("latest_version"), bool(data.get("update_available"))
+    except (urllib.error.URLError, OSError, ValueError):
+        return None
+
+
+def _check_for_update(icon, item):
+    result = _fetch_update_check()
+    if result is None:
+        message = "Impossible de contacter GitHub pour vérifier les mises à jour."
+    else:
+        current, latest, available = result
+        if available and latest:
+            message = f"Version {latest} disponible (actuelle : {current})."
+        else:
+            message = f"Vous utilisez déjà la dernière version ({current})."
+    try:
+        icon.notify(message, APP_NAME)
+    except Exception:
+        pass
+
+
+def _trigger_update(icon, item):
+    result = _fetch_update_check()
+    if result is None or not result[2]:
+        try:
+            icon.notify("Vous utilisez déjà la dernière version.", APP_NAME)
+        except Exception:
+            pass
+        return
+
+    # Priorité à la page d'import CD du RadioStation appairé (marque reconnue par l'utilisateur,
+    # affiche déjà le même bandeau de MAJ automatiquement) — fallback GitHub Releases si
+    # l'application n'est pas encore appairée.
+    server_url = _fetch_paired_server_url()
+    target = f"{server_url.rstrip('/')}/admin/import/cd" if server_url \
+        else "https://github.com/jduffas/radiostation-cd-ripper/releases/latest"
+    subprocess.Popen(["xdg-open", target])
+
+
 def _quit_app(icon, item):
     if _node_proc:
         _node_proc.terminate()
@@ -334,9 +404,13 @@ def _build_menu():
     return pystray.Menu(
         pystray.MenuItem(APP_NAME,                             None, enabled=False),
         pystray.MenuItem(f"Serveur actif — port {PORT}",      None, enabled=False),
+        pystray.MenuItem(f"Version {_fetch_app_version()}",   None, enabled=False),
         pystray.Menu.SEPARATOR,
         pystray.MenuItem("Importer un CD…", _open_import_window),
         pystray.MenuItem("Ouvrir RadioStation dans le navigateur", _open_browser),
+        pystray.Menu.SEPARATOR,
+        pystray.MenuItem("Vérifier la mise à jour", _check_for_update),
+        pystray.MenuItem("Mettre à jour…", _trigger_update),
         pystray.Menu.SEPARATOR,
         pystray.MenuItem(
             "Démarrer automatiquement au login",

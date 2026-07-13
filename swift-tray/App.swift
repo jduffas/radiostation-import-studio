@@ -70,6 +70,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         serverItem.isEnabled = false
         menu.addItem(serverItem)
 
+        let versionItem = NSMenuItem(title: "Version \(fetchAppVersion())", action: nil, keyEquivalent: "")
+        versionItem.isEnabled = false
+        menu.addItem(versionItem)
+
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(
             title: "Importer un CD…",
@@ -79,6 +83,17 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         menu.addItem(NSMenuItem(
             title: "Ouvrir RadioStation dans le navigateur",
             action: #selector(openRadioStation),
+            keyEquivalent: ""
+        ))
+        menu.addItem(.separator())
+        menu.addItem(NSMenuItem(
+            title: "Vérifier la mise à jour",
+            action: #selector(checkForUpdate),
+            keyEquivalent: ""
+        ))
+        menu.addItem(NSMenuItem(
+            title: "Mettre à jour…",
+            action: #selector(triggerUpdate),
             keyEquivalent: ""
         ))
         menu.addItem(.separator())
@@ -105,17 +120,24 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     // `server_url` vient de l'appairage (stocké dans settings.json par ce même endpoint, cf.
     // storeDeviceToken) — plus de saisie manuelle d'adresse côté tray.
-    @objc private func openRadioStation() {
+    private func fetchPairedServerURL(completion: @escaping (URL?) -> Void) {
         var request = URLRequest(url: Self.settingsURL)
         request.timeoutInterval = 1.5
         URLSession.shared.dataTask(with: request) { data, _, _ in
-            var serverURL: String?
+            var serverURL: URL?
             if let data,
-               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                serverURL = json["server_url"] as? String
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let s = json["server_url"] as? String {
+                serverURL = URL(string: s)
             }
+            completion(serverURL)
+        }.resume()
+    }
+
+    @objc private func openRadioStation() {
+        fetchPairedServerURL { url in
             DispatchQueue.main.async {
-                guard let serverURL, let url = URL(string: serverURL) else {
+                guard let url else {
                     let alert = NSAlert()
                     alert.messageText = "Application non appairée"
                     alert.informativeText = "Connectez d'abord cette application à RadioStation depuis le site."
@@ -124,7 +146,107 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 }
                 NSWorkspace.shared.open(url)
             }
+        }
+    }
+
+    // MARK: — Vérification de mise à jour (GET /update-check, cf. main.js)
+
+    private static let statusURL = URL(string: "http://127.0.0.1:19847/status")!
+    private static let updateCheckURL = URL(string: "http://127.0.0.1:19847/update-check")!
+
+    private struct UpdateCheckResult {
+        let currentVersion: String
+        let latestVersion: String?
+        let updateAvailable: Bool
+    }
+
+    /// Lecture synchrone de la version installée — best-effort, même pattern que les autres
+    /// lectures au tout premier affichage du menu (le serveur node vient de démarrer, course
+    /// possible), cf. ancien fetchVocalAnalysisEnabled (retiré, logique migrée vers local-ui).
+    private func fetchAppVersion() -> String {
+        for attempt in 0..<3 {
+            if attempt > 0 { Thread.sleep(forTimeInterval: 0.2) }
+            let semaphore = DispatchSemaphore(value: 0)
+            var result: String?
+            var request = URLRequest(url: Self.statusURL)
+            request.timeoutInterval = 0.5
+            URLSession.shared.dataTask(with: request) { data, _, _ in
+                if let data, let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                    result = json["version"] as? String
+                }
+                semaphore.signal()
+            }.resume()
+            _ = semaphore.wait(timeout: .now() + 0.6)
+            if let result { return result }
+        }
+        return "?"
+    }
+
+    private func fetchUpdateCheck(force: Bool, completion: @escaping (UpdateCheckResult?) -> Void) {
+        var comps = URLComponents(url: Self.updateCheckURL, resolvingAgainstBaseURL: false)!
+        if force { comps.queryItems = [URLQueryItem(name: "force", value: "true")] }
+        var request = URLRequest(url: comps.url!)
+        request.timeoutInterval = 8.0
+        URLSession.shared.dataTask(with: request) { data, _, _ in
+            guard let data,
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                completion(nil)
+                return
+            }
+            completion(UpdateCheckResult(
+                currentVersion: json["current_version"] as? String ?? "?",
+                latestVersion: json["latest_version"] as? String,
+                updateAvailable: json["update_available"] as? Bool ?? false
+            ))
         }.resume()
+    }
+
+    @objc private func checkForUpdate() {
+        fetchUpdateCheck(force: true) { result in
+            DispatchQueue.main.async {
+                let alert = NSAlert()
+                if let result, result.updateAvailable, let latest = result.latestVersion {
+                    alert.messageText = "Mise à jour disponible"
+                    alert.informativeText = "Version \(latest) disponible (actuelle : \(result.currentVersion))."
+                } else if let result {
+                    alert.messageText = "À jour"
+                    alert.informativeText = "Vous utilisez déjà la dernière version (\(result.currentVersion))."
+                } else {
+                    alert.messageText = "Vérification impossible"
+                    alert.informativeText = "Impossible de contacter GitHub pour vérifier les mises à jour."
+                }
+                alert.runModal()
+            }
+        }
+    }
+
+    @objc private func triggerUpdate() {
+        fetchUpdateCheck(force: true) { [weak self] result in
+            guard let self else { return }
+            DispatchQueue.main.async {
+                guard let result, result.updateAvailable else {
+                    let alert = NSAlert()
+                    alert.messageText = "À jour"
+                    alert.informativeText = "Vous utilisez déjà la dernière version."
+                    alert.runModal()
+                    return
+                }
+                self.openUpdatePage()
+            }
+        }
+    }
+
+    // Priorité à la page d'import CD du RadioStation appairé (marque reconnue par l'utilisateur,
+    // affiche déjà le même bandeau de MAJ automatiquement) — fallback GitHub Releases si
+    // l'application n'est pas encore appairée.
+    private func openUpdatePage() {
+        fetchPairedServerURL { serverURL in
+            DispatchQueue.main.async {
+                let target = serverURL?.appendingPathComponent("admin/import/cd")
+                    ?? URL(string: "https://github.com/jduffas/radiostation-cd-ripper/releases/latest")!
+                NSWorkspace.shared.open(target)
+            }
+        }
     }
 
     // MARK: — Fenêtre d'import CD (webview intégrée, interface locale)

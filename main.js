@@ -648,6 +648,79 @@ async function lookupMb(discId) {
 }
 
 // ============================================================
+// Vérification de mise à jour (GitHub releases, repo public — pas de token requis)
+// ============================================================
+
+const GITHUB_REPO = 'jduffas/radiostation-cd-ripper';
+const UPDATE_CHECK_TTL_MS = 6 * 60 * 60 * 1000; // 6h — évite de solliciter l'API GitHub à
+// chaque ouverture de menu (limite 60 req/h non-authentifiée par IP)
+
+let _updateCache = { latestVersion: null, checkedAt: 0 };
+
+function parseVersionParts(v) {
+  return (v || '').replace(/^v/, '').split('.').map(n => parseInt(n, 10) || 0);
+}
+
+function isVersionNewer(candidate, reference) {
+  const a = parseVersionParts(candidate);
+  const b = parseVersionParts(reference);
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    const x = a[i] || 0;
+    const y = b[i] || 0;
+    if (x !== y) return x > y;
+  }
+  return false;
+}
+
+function fetchLatestReleaseVersion() {
+  return new Promise(resolve => {
+    const opts = {
+      hostname: 'api.github.com',
+      path: `/repos/${GITHUB_REPO}/releases/latest`,
+      headers: {
+        'User-Agent': 'RadioStation-CDRipper',
+        'Accept': 'application/vnd.github+json',
+      },
+      timeout: 5000,
+    };
+    const req = https.get(opts, res => {
+      let d = '';
+      res.on('data', c => { d += c; });
+      res.on('end', () => {
+        try {
+          const tag = JSON.parse(d).tag_name || '';
+          resolve(tag.replace(/^v/, '') || null);
+        } catch {
+          resolve(null);
+        }
+      });
+    });
+    req.on('error', () => resolve(null));
+    req.on('timeout', () => { req.destroy(); resolve(null); });
+  });
+}
+
+// `force` bypasse le cache (déclenché par le menu "Vérifier la mise à jour" des 3 trays) ; sans
+// `force`, sert le cache si < 6h (vérification automatique en arrière-plan, cf. setInterval plus
+// bas) — un échec réseau ponctuel ne doit pas effacer la dernière version connue.
+async function checkForUpdates(force = false) {
+  const now = Date.now();
+  if (!force && _updateCache.latestVersion && now - _updateCache.checkedAt < UPDATE_CHECK_TTL_MS) {
+    return _updateCache;
+  }
+  const version = await fetchLatestReleaseVersion();
+  if (version) {
+    _updateCache = { latestVersion: version, checkedAt: now };
+  } else if (force) {
+    _updateCache = { ..._updateCache, checkedAt: now };
+  }
+  return _updateCache;
+}
+
+checkForUpdates(); // vérification au démarrage
+setInterval(() => { checkForUpdates(); }, UPDATE_CHECK_TTL_MS);
+
+// ============================================================
 // Rip des pistes
 // ============================================================
 
@@ -1117,6 +1190,16 @@ const server = http.createServer(async (req, res) => {
       platform: PLATFORM,
       bundledFfmpeg: BUNDLED_FFMPEG,
       version: APP_VERSION,
+    });
+  }
+
+  if (req.method === 'GET' && pathname === '/update-check') {
+    const force = new URL(req.url, `http://localhost:${PORT}`).searchParams.get('force') === 'true';
+    const result = await checkForUpdates(force);
+    return jsonResp(res, 200, {
+      current_version: APP_VERSION,
+      latest_version: result.latestVersion,
+      update_available: !!(result.latestVersion && isVersionNewer(result.latestVersion, APP_VERSION)),
     });
   }
 

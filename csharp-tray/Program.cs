@@ -76,6 +76,8 @@ class TrayApp : ApplicationContext
     private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromMilliseconds(600) };
     // Pas "const" : une chaîne interpolée avec un placeholder int n'est pas une constante de compilation en C#.
     private static readonly string SettingsUrl = $"http://127.0.0.1:{Port}/settings";
+    private static readonly string StatusUrl = $"http://127.0.0.1:{Port}/status";
+    private static readonly string UpdateCheckUrl = $"http://127.0.0.1:{Port}/update-check";
 
     public TrayApp(string? startupPairingUrl)
     {
@@ -103,6 +105,7 @@ class TrayApp : ApplicationContext
 
         menu.Items.Add(new ToolStripMenuItem(AppName)                     { Enabled = false });
         menu.Items.Add(new ToolStripMenuItem($"Serveur actif — port {Port}") { Enabled = false });
+        menu.Items.Add(new ToolStripMenuItem($"Version {FetchAppVersion()}") { Enabled = false });
         menu.Items.Add(new ToolStripSeparator());
 
         var importItem = new ToolStripMenuItem("Importer un CD…");
@@ -112,6 +115,16 @@ class TrayApp : ApplicationContext
         var openItem = new ToolStripMenuItem("Ouvrir RadioStation dans le navigateur");
         openItem.Click += (_, _) => _ = OpenBrowserAsync();
         menu.Items.Add(openItem);
+
+        menu.Items.Add(new ToolStripSeparator());
+
+        var checkUpdateItem = new ToolStripMenuItem("Vérifier la mise à jour");
+        checkUpdateItem.Click += (_, _) => _ = CheckForUpdateAsync();
+        menu.Items.Add(checkUpdateItem);
+
+        var triggerUpdateItem = new ToolStripMenuItem("Mettre à jour…");
+        triggerUpdateItem.Click += (_, _) => _ = TriggerUpdateAsync();
+        menu.Items.Add(triggerUpdateItem);
 
         menu.Items.Add(new ToolStripSeparator());
 
@@ -264,18 +277,22 @@ class TrayApp : ApplicationContext
 
     /// `server_url` vient de l'appairage (stocké dans settings.json par ce même endpoint,
     /// cf. HandlePairingUrlAsync) — plus de saisie manuelle d'adresse côté tray.
-    private static async Task OpenBrowserAsync()
+    private static async Task<string?> FetchPairedServerUrlAsync()
     {
-        string? serverUrl = null;
         try
         {
             var json = await Http.GetStringAsync(SettingsUrl);
             using var doc = JsonDocument.Parse(json);
             if (doc.RootElement.TryGetProperty("server_url", out var v) && v.ValueKind == JsonValueKind.String)
-                serverUrl = v.GetString();
+                return v.GetString();
         }
         catch { /* serveur local injoignable — traité comme non appairé */ }
+        return null;
+    }
 
+    private static async Task OpenBrowserAsync()
+    {
+        var serverUrl = await FetchPairedServerUrlAsync();
         if (string.IsNullOrEmpty(serverUrl))
         {
             MessageBox.Show("L'application n'est pas encore appairée à RadioStation.", AppName,
@@ -283,6 +300,91 @@ class TrayApp : ApplicationContext
             return;
         }
         Process.Start(new ProcessStartInfo(serverUrl) { UseShellExecute = true });
+    }
+
+    // ── Vérification de mise à jour (GET /update-check, cf. main.js) ───────────
+
+    /// Lecture synchrone (bloque le thread UI au démarrage, court) de la version installée —
+    /// best-effort, même pattern que les autres lectures au tout premier affichage du menu (le
+    /// serveur node vient de démarrer, course possible).
+    private static string FetchAppVersion()
+    {
+        for (var attempt = 0; attempt < 3; attempt++)
+        {
+            if (attempt > 0) System.Threading.Thread.Sleep(200);
+            try
+            {
+                var json = Http.GetStringAsync(StatusUrl).GetAwaiter().GetResult();
+                using var doc = JsonDocument.Parse(json);
+                if (doc.RootElement.TryGetProperty("version", out var v) && v.ValueKind == JsonValueKind.String)
+                    return v.GetString() ?? "?";
+            }
+            catch { /* serveur pas encore prêt — on retente */ }
+        }
+        return "?";
+    }
+
+    private record UpdateCheckResult(string CurrentVersion, string? LatestVersion, bool UpdateAvailable);
+
+    private static async Task<UpdateCheckResult?> FetchUpdateCheckAsync()
+    {
+        try
+        {
+            var json = await Http.GetStringAsync($"{UpdateCheckUrl}?force=true");
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+            var current = root.TryGetProperty("current_version", out var c) ? c.GetString() ?? "?" : "?";
+            string? latest = root.TryGetProperty("latest_version", out var l) && l.ValueKind == JsonValueKind.String
+                ? l.GetString() : null;
+            var available = root.TryGetProperty("update_available", out var a) && a.ValueKind == JsonValueKind.True;
+            return new UpdateCheckResult(current, latest, available);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static async Task CheckForUpdateAsync()
+    {
+        var result = await FetchUpdateCheckAsync();
+        string title, message;
+        if (result != null && result.UpdateAvailable && result.LatestVersion != null)
+        {
+            title = "Mise à jour disponible";
+            message = $"Version {result.LatestVersion} disponible (actuelle : {result.CurrentVersion}).";
+        }
+        else if (result != null)
+        {
+            title = "À jour";
+            message = $"Vous utilisez déjà la dernière version ({result.CurrentVersion}).";
+        }
+        else
+        {
+            title = "Vérification impossible";
+            message = "Impossible de contacter GitHub pour vérifier les mises à jour.";
+        }
+        MessageBox.Show(message, title, MessageBoxButtons.OK, MessageBoxIcon.Information);
+    }
+
+    private static async Task TriggerUpdateAsync()
+    {
+        var result = await FetchUpdateCheckAsync();
+        if (result == null || !result.UpdateAvailable)
+        {
+            MessageBox.Show("Vous utilisez déjà la dernière version.", "À jour",
+                MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        // Priorité à la page d'import CD du RadioStation appairé (marque reconnue par
+        // l'utilisateur, affiche déjà le même bandeau de MAJ automatiquement) — fallback GitHub
+        // Releases si l'application n'est pas encore appairée.
+        var serverUrl = await FetchPairedServerUrlAsync();
+        var target = !string.IsNullOrEmpty(serverUrl)
+            ? $"{serverUrl.TrimEnd('/')}/admin/import/cd"
+            : "https://github.com/jduffas/radiostation-cd-ripper/releases/latest";
+        Process.Start(new ProcessStartInfo(target) { UseShellExecute = true });
     }
 
     // ── Appairage autonome (Phase 2c) ─────────────────────────────────────────
