@@ -1,6 +1,6 @@
 {
   "name": "radiostation-cd-ripper",
-  "version": "1.5.4",
+  "version": "1.5.5",
   "description": "Import CD vers RadioStation — application autonome",
   "author": "RadioStation",
   "scripts": {
