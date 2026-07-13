@@ -67,6 +67,8 @@ class TrayApp : ApplicationContext
     private Process? _nodeProcess;
     private DateTime _processStartTime;
     private ImportWindow? _importWindow;
+    private ToolStripMenuItem? _updateMenuItem;
+    private System.Windows.Forms.Timer? _updatePollTimer;
 
     private const int    Port          = 19847;
     private const string AppName       = "RadioStation CD Ripper";
@@ -74,6 +76,10 @@ class TrayApp : ApplicationContext
     private const string RegRunValue   = "RadioStationCDRipper";
 
     private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromMilliseconds(600) };
+    // Timeout plus long dédié : /update-check peut relayer un appel réel à l'API GitHub côté
+    // main.js (jusqu'à 5s, cf. fetchLatestReleaseVersion) — le timeout court de Http ci-dessus
+    // (pensé pour /settings et /status, purement locaux) couperait la requête avant la réponse.
+    private static readonly HttpClient HttpUpdateCheck = new() { Timeout = TimeSpan.FromSeconds(10) };
     // Pas "const" : une chaîne interpolée avec un placeholder int n'est pas une constante de compilation en C#.
     private static readonly string SettingsUrl = $"http://127.0.0.1:{Port}/settings";
     private static readonly string StatusUrl = $"http://127.0.0.1:{Port}/status";
@@ -92,6 +98,15 @@ class TrayApp : ApplicationContext
         StartNodeServer();
         _tray.ContextMenuStrip = BuildMenu();
         ShowStartupNotification();
+
+        // "Mettre à jour…" démarre grisé (Enabled = false ci-dessus) — rafraîchi tout de suite
+        // puis toutes les 5 min (lecture du cache de main.js, pas un nouvel appel GitHub à
+        // chaque fois, cf. /update-check sans force). Timer WinForms : callback déjà sur le
+        // thread UI, pas besoin de marshaler pour toucher _updateMenuItem.Enabled.
+        _ = RefreshUpdateAvailabilityAsync();
+        _updatePollTimer = new System.Windows.Forms.Timer { Interval = 300_000 };
+        _updatePollTimer.Tick += (_, _) => _ = RefreshUpdateAvailabilityAsync();
+        _updatePollTimer.Start();
 
         StartPairingPipeServer();
         if (startupPairingUrl != null) _ = HandlePairingUrlAsync(startupPairingUrl);
@@ -122,9 +137,10 @@ class TrayApp : ApplicationContext
         checkUpdateItem.Click += (_, _) => _ = CheckForUpdateAsync();
         menu.Items.Add(checkUpdateItem);
 
-        var triggerUpdateItem = new ToolStripMenuItem("Mettre à jour…");
+        var triggerUpdateItem = new ToolStripMenuItem("Mettre à jour…") { Enabled = false };
         triggerUpdateItem.Click += (_, _) => _ = TriggerUpdateAsync();
         menu.Items.Add(triggerUpdateItem);
+        _updateMenuItem = triggerUpdateItem;
 
         menu.Items.Add(new ToolStripSeparator());
 
@@ -326,11 +342,12 @@ class TrayApp : ApplicationContext
 
     private record UpdateCheckResult(string CurrentVersion, string? LatestVersion, bool UpdateAvailable);
 
-    private static async Task<UpdateCheckResult?> FetchUpdateCheckAsync()
+    private static async Task<UpdateCheckResult?> FetchUpdateCheckAsync(bool force)
     {
         try
         {
-            var json = await Http.GetStringAsync($"{UpdateCheckUrl}?force=true");
+            var url = force ? $"{UpdateCheckUrl}?force=true" : UpdateCheckUrl;
+            var json = await HttpUpdateCheck.GetStringAsync(url);
             using var doc = JsonDocument.Parse(json);
             var root = doc.RootElement;
             var current = root.TryGetProperty("current_version", out var c) ? c.GetString() ?? "?" : "?";
@@ -345,9 +362,20 @@ class TrayApp : ApplicationContext
         }
     }
 
-    private static async Task CheckForUpdateAsync()
+    /// Rafraîchit l'état grisé/actif de "Mettre à jour…" — appelé au démarrage puis toutes les
+    /// 5 min. Non forcé : lit le cache de main.js, ne déclenche pas de nouvel appel GitHub à
+    /// chaque poll.
+    private async Task RefreshUpdateAvailabilityAsync()
     {
-        var result = await FetchUpdateCheckAsync();
+        var result = await FetchUpdateCheckAsync(force: false);
+        if (_updateMenuItem != null) _updateMenuItem.Enabled = result?.UpdateAvailable ?? false;
+    }
+
+    private async Task CheckForUpdateAsync()
+    {
+        var result = await FetchUpdateCheckAsync(force: true);
+        if (_updateMenuItem != null) _updateMenuItem.Enabled = result?.UpdateAvailable ?? false;
+
         string title, message;
         if (result != null && result.UpdateAvailable && result.LatestVersion != null)
         {
@@ -367,9 +395,10 @@ class TrayApp : ApplicationContext
         MessageBox.Show(message, title, MessageBoxButtons.OK, MessageBoxIcon.Information);
     }
 
-    private static async Task TriggerUpdateAsync()
+    private async Task TriggerUpdateAsync()
     {
-        var result = await FetchUpdateCheckAsync();
+        var result = await FetchUpdateCheckAsync(force: true);
+        if (_updateMenuItem != null) _updateMenuItem.Enabled = result?.UpdateAvailable ?? false;
         if (result == null || !result.UpdateAvailable)
         {
             MessageBox.Show("Vous utilisez déjà la dernière version.", "À jour",
@@ -498,6 +527,7 @@ class TrayApp : ApplicationContext
 
     private void Quit()
     {
+        _updatePollTimer?.Stop();
         try { _nodeProcess?.Kill(); } catch { /* ignore */ }
         try { _importWindow?.Close(); } catch { /* ignore */ }
         _tray.Visible = false;
@@ -508,6 +538,7 @@ class TrayApp : ApplicationContext
     {
         if (disposing)
         {
+            _updatePollTimer?.Dispose();
             try { _nodeProcess?.Kill(); } catch { /* ignore */ }
             try { _importWindow?.Dispose(); } catch { /* ignore */ }
             _tray.Dispose();

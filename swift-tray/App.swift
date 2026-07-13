@@ -23,6 +23,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var processStartTime: Date?
     private var importWindow: NSWindow?
     private var importWebView: WKWebView?
+    private var updateMenuItem: NSMenuItem?
+    private var updatePollTimer: Timer?
 
     // MARK: — Lifecycle
 
@@ -30,6 +32,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         startNodeServer()
         buildStatusItem()
         sendStartupNotification()
+
+        // "Mettre à jour…" démarre grisé (état par défaut sûr tant qu'on n'a pas de réponse) —
+        // rafraîchi tout de suite puis toutes les 5 min (lecture du cache de main.js, pas un
+        // nouvel appel GitHub à chaque fois, cf. /update-check sans force).
+        refreshUpdateAvailability()
+        updatePollTimer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in
+            self?.refreshUpdateAvailability()
+        }
 
         // Appairage autonome (Phase 2c) : radiostation-cdripper://pair?server=…&code=…
         // reçu comme Apple Event standard (kAEGetURL) — mécanisme historique AppKit pour les
@@ -43,6 +53,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        updatePollTimer?.invalidate()
         nodeProcess?.terminate()
     }
 
@@ -91,11 +102,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             action: #selector(checkForUpdate),
             keyEquivalent: ""
         ))
-        menu.addItem(NSMenuItem(
+        let updateItem = NSMenuItem(
             title: "Mettre à jour…",
             action: #selector(triggerUpdate),
             keyEquivalent: ""
-        ))
+        )
+        updateItem.isEnabled = false // grisé tant qu'on ne sait pas qu'une MAJ existe
+        menu.addItem(updateItem)
+        updateMenuItem = updateItem
         menu.addItem(.separator())
 
         let loginItem = NSMenuItem(
@@ -201,9 +215,21 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }.resume()
     }
 
-    @objc private func checkForUpdate() {
-        fetchUpdateCheck(force: true) { result in
+    /// Rafraîchit l'état grisé/actif de "Mettre à jour…" — appelé au démarrage puis toutes les
+    /// 5 min (cf. applicationDidFinishLaunching). Non forcé : lit le cache de main.js, ne
+    /// déclenche pas de nouvel appel GitHub à chaque poll.
+    private func refreshUpdateAvailability() {
+        fetchUpdateCheck(force: false) { [weak self] result in
             DispatchQueue.main.async {
+                self?.updateMenuItem?.isEnabled = result?.updateAvailable ?? false
+            }
+        }
+    }
+
+    @objc private func checkForUpdate() {
+        fetchUpdateCheck(force: true) { [weak self] result in
+            DispatchQueue.main.async {
+                self?.updateMenuItem?.isEnabled = result?.updateAvailable ?? false
                 let alert = NSAlert()
                 if let result, result.updateAvailable, let latest = result.latestVersion {
                     alert.messageText = "Mise à jour disponible"
@@ -224,6 +250,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         fetchUpdateCheck(force: true) { [weak self] result in
             guard let self else { return }
             DispatchQueue.main.async {
+                self.updateMenuItem?.isEnabled = result?.updateAvailable ?? false
                 guard let result, result.updateAvailable else {
                     let alert = NSAlert()
                     alert.messageText = "À jour"

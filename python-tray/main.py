@@ -350,18 +350,40 @@ def _fetch_app_version() -> str:
     return "?"
 
 
-def _fetch_update_check():
+def _fetch_update_check(force: bool):
     """Retourne (current_version, latest_version, update_available) ou None si injoignable."""
+    url = f"{UPDATE_CHECK_URL}?force=true" if force else UPDATE_CHECK_URL
     try:
-        with urllib.request.urlopen(f"{UPDATE_CHECK_URL}?force=true", timeout=8) as resp:
+        with urllib.request.urlopen(url, timeout=8) as resp:
             data = json.loads(resp.read().decode("utf-8"))
             return data.get("current_version"), data.get("latest_version"), bool(data.get("update_available"))
     except (urllib.error.URLError, OSError, ValueError):
         return None
 
 
+# État partagé lu par le lambda `enabled=` de "Mettre à jour…" (cf. _build_menu) — pystray
+# n'appelle ce lambda que lorsqu'on force explicitement un rafraîchissement via
+# `icon.update_menu()` (pas à chaque ouverture, contrairement à `checked=`), d'où le poll
+# périodique ci-dessous plutôt qu'une simple lecture réseau dans le lambda lui-même.
+_update_state = {"available": False}
+
+
+def _refresh_update_availability(icon):
+    result = _fetch_update_check(force=False)
+    _update_state["available"] = bool(result and result[2])
+    icon.update_menu()
+
+
+def _update_poll_loop(icon):
+    while True:
+        time.sleep(300)
+        _refresh_update_availability(icon)
+
+
 def _check_for_update(icon, item):
-    result = _fetch_update_check()
+    result = _fetch_update_check(force=True)
+    _update_state["available"] = bool(result and result[2])
+    icon.update_menu()
     if result is None:
         message = "Impossible de contacter GitHub pour vérifier les mises à jour."
     else:
@@ -377,7 +399,9 @@ def _check_for_update(icon, item):
 
 
 def _trigger_update(icon, item):
-    result = _fetch_update_check()
+    result = _fetch_update_check(force=True)
+    _update_state["available"] = bool(result and result[2])
+    icon.update_menu()
     if result is None or not result[2]:
         try:
             icon.notify("Vous utilisez déjà la dernière version.", APP_NAME)
@@ -410,7 +434,11 @@ def _build_menu():
         pystray.MenuItem("Ouvrir RadioStation dans le navigateur", _open_browser),
         pystray.Menu.SEPARATOR,
         pystray.MenuItem("Vérifier la mise à jour", _check_for_update),
-        pystray.MenuItem("Mettre à jour…", _trigger_update),
+        pystray.MenuItem(
+            "Mettre à jour…",
+            _trigger_update,
+            enabled=lambda item: _update_state["available"],
+        ),
         pystray.Menu.SEPARATOR,
         pystray.MenuItem(
             "Démarrer automatiquement au login",
@@ -455,6 +483,8 @@ def main():
         _serve_pairing_socket(pairing_socket, icon)
         if pairing_url:
             threading.Thread(target=_handle_pairing_url, args=(pairing_url, icon), daemon=True).start()
+        threading.Thread(target=_refresh_update_availability, args=(icon,), daemon=True).start()
+        threading.Thread(target=_update_poll_loop, args=(icon,), daemon=True).start()
 
     icon.run(setup=_on_ready_with_pairing)
 
