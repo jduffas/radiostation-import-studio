@@ -1110,7 +1110,7 @@ const server = http.createServer(async (req, res) => {
       ok: true, ...cd,
       platform: PLATFORM,
       bundledFfmpeg: BUNDLED_FFMPEG,
-      version: '1.3',
+      version: '1.4',
     });
   }
 
@@ -1397,7 +1397,7 @@ const server = http.createServer(async (req, res) => {
 // ============================================================
 
 server.listen(PORT, '127.0.0.1', () => {
-  console.log(`RadioStation CD Ripper v1.3 — http://127.0.0.1:${PORT}`);
+  console.log(`RadioStation CD Ripper v1.4 — http://127.0.0.1:${PORT}`);
   console.log(`Plateforme : ${PLATFORM} | ffmpeg bundlé : ${BUNDLED_FFMPEG}`);
   if (PLATFORM === 'win32') console.log(`Lecteur CD : ${getCdDevice()}`);
 });
