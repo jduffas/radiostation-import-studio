@@ -9,6 +9,7 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
+using Microsoft.Web.WebView2.WinForms;
 using Microsoft.Win32;
 
 namespace RadioStationCDRipper;
@@ -65,6 +66,7 @@ class TrayApp : ApplicationContext
     private readonly NotifyIcon _tray;
     private Process? _nodeProcess;
     private DateTime _processStartTime;
+    private ImportWindow? _importWindow;
 
     private const int    Port          = 19847;
     private const string AppName       = "RadioStation CD Ripper";
@@ -104,6 +106,10 @@ class TrayApp : ApplicationContext
         menu.Items.Add(new ToolStripMenuItem(AppName)                     { Enabled = false });
         menu.Items.Add(new ToolStripMenuItem($"Serveur actif — port {Port}") { Enabled = false });
         menu.Items.Add(new ToolStripSeparator());
+
+        var importItem = new ToolStripMenuItem("Importer un CD…");
+        importItem.Click += (_, _) => OpenImportWindow();
+        menu.Items.Add(importItem);
 
         var openItem = new ToolStripMenuItem("Ouvrir RadioStation dans le navigateur");
         openItem.Click += (_, _) => OpenBrowser();
@@ -404,6 +410,40 @@ class TrayApp : ApplicationContext
         _tray.ShowBalloonTip(4000);
     }
 
+    // ── Fenêtre d'import CD (webview intégrée, Phase 2b) ──────────────────────
+
+    // Priorité au server_url connu de main.js (déjà résolu si l'app est appairée, Phase 2c) —
+    // sinon repli sur RADIOSTATION_URL/localhost, comme OpenBrowser().
+    private static async Task<string> ResolveEffectiveRadioStationUrlAsync()
+    {
+        try
+        {
+            var json = await Http.GetStringAsync(SettingsUrl);
+            using var doc = JsonDocument.Parse(json);
+            if (doc.RootElement.TryGetProperty("server_url", out var v) && v.ValueKind == JsonValueKind.String)
+            {
+                var s = v.GetString();
+                if (!string.IsNullOrEmpty(s)) return s!;
+            }
+        }
+        catch { /* repli ci-dessous */ }
+        return Environment.GetEnvironmentVariable("RADIOSTATION_URL") ?? "http://localhost:8080";
+    }
+
+    private async void OpenImportWindow()
+    {
+        if (_importWindow is { IsDisposed: false })
+        {
+            _importWindow.Activate();
+            return;
+        }
+        var baseUrl = await ResolveEffectiveRadioStationUrlAsync();
+        _importWindow = new ImportWindow(baseUrl + "/admin/import/cd");
+        _importWindow.FormClosed += (_, _) => _importWindow = null;
+        _importWindow.Show();
+        _importWindow.Activate();
+    }
+
     // ── Actions ───────────────────────────────────────────────────────────────
 
     private static void OpenBrowser()
@@ -415,6 +455,7 @@ class TrayApp : ApplicationContext
     private void Quit()
     {
         try { _nodeProcess?.Kill(); } catch { /* ignore */ }
+        try { _importWindow?.Close(); } catch { /* ignore */ }
         _tray.Visible = false;
         Application.Exit();
     }
@@ -424,8 +465,42 @@ class TrayApp : ApplicationContext
         if (disposing)
         {
             try { _nodeProcess?.Kill(); } catch { /* ignore */ }
+            try { _importWindow?.Dispose(); } catch { /* ignore */ }
             _tray.Dispose();
         }
         base.Dispose(disposing);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Fenêtre d'import CD — webview WebView2 pointée sur /admin/import/cd (Phase 2b)
+// ─────────────────────────────────────────────────────────────────────────────
+
+class ImportWindow : Form
+{
+    public ImportWindow(string url)
+    {
+        Text = "RadioStation — Import CD";
+        Width = 1100;
+        Height = 800;
+        StartPosition = FormStartPosition.CenterScreen;
+
+        var webView = new WebView2 { Dock = DockStyle.Fill };
+        Controls.Add(webView);
+
+        Load += async (_, _) =>
+        {
+            try
+            {
+                await webView.EnsureCoreWebView2Async(null);
+                webView.CoreWebView2.Navigate(url);
+            }
+            catch (Exception e)
+            {
+                MessageBox.Show(
+                    "Impossible d'initialiser WebView2 (runtime absent ?) :\n" + e.Message,
+                    "RadioStation CD Ripper", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        };
     }
 }

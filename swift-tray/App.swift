@@ -1,5 +1,6 @@
 import Cocoa
 import UserNotifications
+import WebKit
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Point d'entrée — menu bar app sans icône Dock
@@ -15,11 +16,13 @@ app.run()
 // Delegate principal
 // ─────────────────────────────────────────────────────────────────────────────
 
-class AppDelegate: NSObject, NSApplicationDelegate {
+class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     private var statusItem: NSStatusItem!
     private var nodeProcess: Process?
     private var processStartTime: Date?
+    private var importWindow: NSWindow?
+    private var importWebView: WKWebView?
 
     // MARK: — Lifecycle
 
@@ -71,6 +74,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(serverItem)
 
         menu.addItem(.separator())
+        menu.addItem(NSMenuItem(
+            title: "Importer un CD…",
+            action: #selector(openImportWindow),
+            keyEquivalent: ""
+        ))
         menu.addItem(NSMenuItem(
             title: "Ouvrir RadioStation dans le navigateur",
             action: #selector(openRadioStation),
@@ -140,6 +148,65 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let val = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !val.isEmpty else { return }
         UserDefaults.standard.set(val, forKey: "radiostation_url")
+    }
+
+    // MARK: — Fenêtre d'import CD (webview intégrée, Phase 2b)
+
+    /// Adresse à utiliser pour la webview : priorité au `server_url` connu de main.js (déjà
+    /// résolu si l'app est appairée, Phase 2c) — sinon le réglage manuel classique.
+    private func effectiveRadioStationURL(completion: @escaping (String) -> Void) {
+        var request = URLRequest(url: Self.settingsURL)
+        request.timeoutInterval = 1.0
+        URLSession.shared.dataTask(with: request) { [weak self] data, _, _ in
+            guard let self else { return }
+            if let data,
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let serverUrl = json["server_url"] as? String, !serverUrl.isEmpty {
+                completion(serverUrl)
+            } else {
+                completion(self.radioStationURL())
+            }
+        }.resume()
+    }
+
+    @objc private func openImportWindow() {
+        if let window = importWindow {
+            NSApp.activate(ignoringOtherApps: true)
+            window.makeKeyAndOrderFront(nil)
+            return
+        }
+        effectiveRadioStationURL { [weak self] base in
+            DispatchQueue.main.async { self?.createAndShowImportWindow(base: base) }
+        }
+    }
+
+    private func createAndShowImportWindow(base: String) {
+        guard let url = URL(string: base + "/admin/import/cd") else { return }
+
+        let webView = WKWebView(frame: NSRect(x: 0, y: 0, width: 1100, height: 800))
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 1100, height: 800),
+            styleMask: [.titled, .closable, .resizable, .miniaturizable],
+            backing: .buffered, defer: false
+        )
+        window.title = "RadioStation — Import CD"
+        window.contentView = webView
+        window.center()
+        window.isReleasedWhenClosed = false
+        window.delegate = self
+
+        webView.load(URLRequest(url: url))
+
+        importWindow = window
+        importWebView = webView
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        guard (notification.object as? NSWindow) === importWindow else { return }
+        importWindow = nil
+        importWebView = nil
     }
 
     @objc private func toggleLoginItem(_ sender: NSMenuItem) {

@@ -28,13 +28,15 @@ APPDIR="$DIST_DIR/AppDir"
 echo "=== Build Linux natif — $ARCH ==="
 mkdir -p "$DIST_DIR"
 
-# ── 1. Dépendances système (AppIndicator3 pour pystray GTK) ───────────────────
+# ── 1. Dépendances système (AppIndicator3 pour pystray GTK + WebKit2GTK pour la fenêtre
+#      d'import CD, Phase 2b) ──────────────────────────────────────────────────
 echo "→ Installation dépendances système..."
 sudo apt-get update -qq
 sudo apt-get install -y -qq \
     libayatana-appindicator3-dev \
     gir1.2-ayatanaappindicator3-0.1 \
-    python3-gi python3-gi-cairo gir1.2-gtk-3.0
+    python3-gi python3-gi-cairo gir1.2-gtk-3.0 \
+    gir1.2-webkit2-4.1
 
 # ── 2. Nuitka — compile l'app tray Python en binaire natif ────────────────────
 # PyInstaller embarque du bytecode .pyc dans le binaire — décompilable en source quasi

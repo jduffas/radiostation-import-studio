@@ -13,4 +13,10 @@
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <InvariantGlobalization>true</InvariantGlobalization>
   </PropertyGroup>
+  <ItemGroup>
+    <!-- Fenêtre d'import CD intégrée (Phase 2b) — nécessite le runtime WebView2 installé sur
+         la machine cible (préinstallé par défaut depuis Windows 11 / la plupart des Windows 10
+         à jour ; sinon bootstrapper à part, cf. scripts/build-win-native.ps1). -->
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4078.44" />
+  </ItemGroup>
 </Project>

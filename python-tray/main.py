@@ -17,6 +17,16 @@ from pathlib import Path
 import pystray
 from PIL import Image, ImageDraw
 
+# Sans ce réglage, WebKit2GTK produit un rendu visuellement corrompu (bandes/artefacts de
+# compositing) sur ce matériel (Raspberry Pi, GPU VC4/Mesa) — bug reproduit et corrigé
+# réellement le 13 juillet 2026. Doit être positionné AVANT toute initialisation de WebKit2.
+os.environ.setdefault("WEBKIT_DISABLE_COMPOSITING_MODE", "1")
+
+import gi
+gi.require_version("Gtk", "3.0")
+gi.require_version("WebKit2", "4.1")
+from gi.repository import Gtk, WebKit2  # noqa: E402
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Chemins — fonctionne en mode normal ET en mode PyInstaller frozen
 # La variable RADIOSTATION_BUNDLE_DIR (positionée par AppRun) indique la
@@ -149,6 +159,51 @@ def _fetch_vocal_analysis_enabled() -> bool:
             return bool(data.get("vocal_analysis_enabled"))
     except (urllib.error.URLError, OSError, ValueError):
         return False
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Fenêtre d'import CD — webview WebKit2GTK intégrée sur /admin/import/cd (Phase 2b)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_import_window = None  # référence module-level : évite le garbage-collect de la fenêtre GTK
+
+
+def _resolve_effective_radiostation_url() -> str:
+    """Priorité au server_url connu de main.js (deja resolu si l'app est appairee, Phase 2c) -
+    sinon repli sur RADIOSTATION_URL/localhost, meme comportement que _open_browser."""
+    try:
+        with urllib.request.urlopen(SETTINGS_URL, timeout=1) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            server_url = data.get("server_url")
+            if server_url:
+                return server_url
+    except (urllib.error.URLError, OSError, ValueError):
+        pass
+    return os.environ.get("RADIOSTATION_URL", "http://localhost:8080")
+
+
+def _open_import_window(icon, item):
+    global _import_window
+    if _import_window is not None:
+        _import_window.present()
+        return
+
+    base_url = _resolve_effective_radiostation_url()
+
+    window = Gtk.Window(title="RadioStation — Import CD")
+    window.set_default_size(1100, 800)
+
+    webview = WebKit2.WebView()
+    webview.load_uri(f"{base_url}/admin/import/cd")
+    window.add(webview)
+
+    def _on_destroy(_widget):
+        global _import_window
+        _import_window = None
+
+    window.connect("destroy", _on_destroy)
+    window.show_all()
+    window.present()
+    _import_window = window
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Appairage autonome (Phase 2c) — radiostation-cdripper://pair?server=…&code=…
@@ -309,6 +364,7 @@ def _build_menu():
         pystray.MenuItem(APP_NAME,                             None, enabled=False),
         pystray.MenuItem(f"Serveur actif — port {PORT}",      None, enabled=False),
         pystray.Menu.SEPARATOR,
+        pystray.MenuItem("Importer un CD…", _open_import_window),
         pystray.MenuItem("Ouvrir RadioStation dans le navigateur", _open_browser),
         pystray.Menu.SEPARATOR,
         pystray.MenuItem(
