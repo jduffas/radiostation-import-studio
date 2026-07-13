@@ -145,22 +145,6 @@ def _set_login_item(enabled: bool):
         path.unlink(missing_ok=True)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Réglages du serveur local (/settings) — pas de course au démarrage à gérer
-# ici : contrairement aux trays Swift/C#, pystray réévalue `checked` à chaque
-# ouverture du menu (pas une seule fois à la construction), donc un serveur pas
-# encore prêt au tout premier affichage se corrige de lui-même à l'ouverture
-# suivante, sans logique de retry.
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _fetch_vocal_analysis_enabled() -> bool:
-    try:
-        with urllib.request.urlopen(SETTINGS_URL, timeout=1) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            return bool(data.get("vocal_analysis_enabled"))
-    except (urllib.error.URLError, OSError, ValueError):
-        return False
-
-# ─────────────────────────────────────────────────────────────────────────────
 # Fenêtre d'import CD — webview WebKit2GTK intégrée sur l'interface locale (servie par ce
 # process lui-même, cf. local-ui/) — aucune dépendance réseau au site RadioStation pour
 # l'interface elle-même : détection CD, rip, coupe et cue points tournent entièrement en
@@ -318,29 +302,26 @@ def _relay_pairing_url_to_running_instance(url: str):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _open_browser(icon, item):
-    url = os.environ.get("RADIOSTATION_URL", "http://localhost:8080")
-    subprocess.Popen(["xdg-open", url])
+    # `server_url` vient de l'appairage (stocké dans settings.json par ce même endpoint) —
+    # plus de saisie manuelle d'adresse côté tray.
+    try:
+        with urllib.request.urlopen(SETTINGS_URL, timeout=1) as resp:
+            server_url = json.loads(resp.read().decode("utf-8")).get("server_url")
+    except (urllib.error.URLError, OSError, ValueError):
+        server_url = None
+
+    if not server_url:
+        try:
+            icon.notify("Application non appairée — connectez-la d'abord depuis le site.", APP_NAME)
+        except Exception:
+            pass
+        return
+    subprocess.Popen(["xdg-open", server_url])
 
 
 def _toggle_login(icon, item):
     _set_login_item(not _is_login_enabled())
     icon.menu = _build_menu()
-
-
-def _toggle_vocal_analysis(icon, item):
-    enable = not _fetch_vocal_analysis_enabled()
-    body = json.dumps({"vocal_analysis_enabled": enable}).encode("utf-8")
-    req = urllib.request.Request(
-        SETTINGS_URL, data=body, method="POST",
-        headers={"Content-Type": "application/json"},
-    )
-    try:
-        urllib.request.urlopen(req, timeout=1)
-    except (urllib.error.URLError, OSError):
-        try:
-            icon.notify("Impossible de sauvegarder les paramètres.", APP_NAME)
-        except Exception:
-            pass  # notify() dépend du backend desktop, pas garanti partout
 
 
 def _quit_app(icon, item):
@@ -356,12 +337,6 @@ def _build_menu():
         pystray.Menu.SEPARATOR,
         pystray.MenuItem("Importer un CD…", _open_import_window),
         pystray.MenuItem("Ouvrir RadioStation dans le navigateur", _open_browser),
-        pystray.Menu.SEPARATOR,
-        pystray.MenuItem(
-            "Analyse vocale (zones jingle)",
-            _toggle_vocal_analysis,
-            checked=lambda item: _fetch_vocal_analysis_enabled(),
-        ),
         pystray.Menu.SEPARATOR,
         pystray.MenuItem(
             "Démarrer automatiquement au login",

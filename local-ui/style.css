@@ -38,6 +38,22 @@ body {
   margin: 0;
 }
 
+.topbar-right {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.vocal-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.85rem;
+  color: var(--text-dim);
+  cursor: pointer;
+  user-select: none;
+}
+
 .pairing-indicator {
   font-size: 0.85rem;
   color: var(--text-dim);

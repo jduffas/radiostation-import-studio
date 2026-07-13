@@ -27,9 +27,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     // MARK: — Lifecycle
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // Le serveur démarre avant le menu pour que la lecture de /settings (case
-        // "Analyse vocale") ait une petite longueur d'avance — reste best-effort,
-        // le spawn du process ne garantit pas que le serveur HTTP écoute déjà.
         startNodeServer()
         buildStatusItem()
         sendStartupNotification()
@@ -84,22 +81,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             action: #selector(openRadioStation),
             keyEquivalent: ""
         ))
-        menu.addItem(NSMenuItem(
-            title: "Configurer l'adresse…",
-            action: #selector(configureURL),
-            keyEquivalent: ""
-        ))
-        menu.addItem(.separator())
-
-        let vocalItem = NSMenuItem(
-            title: "Analyse vocale (zones jingle)",
-            action: #selector(toggleVocalAnalysis(_:)),
-            keyEquivalent: ""
-        )
-        vocalItem.toolTip = "Détecter automatiquement les zones sans voix après chaque rip"
-        vocalItem.state = fetchVocalAnalysisEnabled() ? .on : .off
-        menu.addItem(vocalItem)
-
         menu.addItem(.separator())
 
         let loginItem = NSMenuItem(
@@ -122,32 +103,28 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     // MARK: — Actions
 
-    private func radioStationURL() -> String {
-        UserDefaults.standard.string(forKey: "radiostation_url") ?? "http://localhost:8080"
-    }
-
+    // `server_url` vient de l'appairage (stocké dans settings.json par ce même endpoint, cf.
+    // storeDeviceToken) — plus de saisie manuelle d'adresse côté tray.
     @objc private func openRadioStation() {
-        guard let url = URL(string: radioStationURL()) else { return }
-        NSWorkspace.shared.open(url)
-    }
-
-    @objc private func configureURL() {
-        let alert = NSAlert()
-        alert.messageText = "Adresse de RadioStation"
-        alert.informativeText = "Adresse du serveur RadioStation (ex : http://192.168.1.10:8080)"
-        alert.addButton(withTitle: "Enregistrer")
-        alert.addButton(withTitle: "Annuler")
-
-        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 320, height: 24))
-        field.stringValue = radioStationURL()
-        field.placeholderString = "http://192.168.1.10:8080"
-        alert.accessoryView = field
-        alert.window.initialFirstResponder = field
-
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-        let val = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !val.isEmpty else { return }
-        UserDefaults.standard.set(val, forKey: "radiostation_url")
+        var request = URLRequest(url: Self.settingsURL)
+        request.timeoutInterval = 1.5
+        URLSession.shared.dataTask(with: request) { data, _, _ in
+            var serverURL: String?
+            if let data,
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                serverURL = json["server_url"] as? String
+            }
+            DispatchQueue.main.async {
+                guard let serverURL, let url = URL(string: serverURL) else {
+                    let alert = NSAlert()
+                    alert.messageText = "Application non appairée"
+                    alert.informativeText = "Connectez d'abord cette application à RadioStation depuis le site."
+                    alert.runModal()
+                    return
+                }
+                NSWorkspace.shared.open(url)
+            }
+        }.resume()
     }
 
     // MARK: — Fenêtre d'import CD (webview intégrée, interface locale)
@@ -204,51 +181,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     // MARK: — Réglages du serveur local (/settings)
 
     private static let settingsURL = URL(string: "http://127.0.0.1:19847/settings")!
-
-    /// Lecture synchrone de `vocal_analysis_enabled` — best-effort, quelques tentatives
-    /// courtes car appelée juste après le lancement du process node (course possible).
-    private func fetchVocalAnalysisEnabled() -> Bool {
-        for attempt in 0..<3 {
-            if attempt > 0 { Thread.sleep(forTimeInterval: 0.2) }
-            let semaphore = DispatchSemaphore(value: 0)
-            var result: Bool?
-            var request = URLRequest(url: Self.settingsURL)
-            request.timeoutInterval = 0.5
-            URLSession.shared.dataTask(with: request) { data, _, _ in
-                if let data,
-                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                    result = (json["vocal_analysis_enabled"] as? Bool) ?? false
-                }
-                semaphore.signal()
-            }.resume()
-            _ = semaphore.wait(timeout: .now() + 0.6)
-            if let result { return result }
-        }
-        return false
-    }
-
-    @objc private func toggleVocalAnalysis(_ sender: NSMenuItem) {
-        let enable = sender.state == .off
-        sender.state = enable ? .on : .off // optimiste — Electron ne rebuild pas non plus le menu
-
-        var request = URLRequest(url: Self.settingsURL)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try? JSONSerialization.data(withJSONObject: ["vocal_analysis_enabled": enable])
-
-        URLSession.shared.dataTask(with: request) { _, response, error in
-            let ok = error == nil && (response as? HTTPURLResponse)?.statusCode == 200
-            if !ok {
-                DispatchQueue.main.async {
-                    sender.state = enable ? .off : .on // revert
-                    let alert = NSAlert()
-                    alert.messageText = "Erreur"
-                    alert.informativeText = "Impossible de sauvegarder les paramètres."
-                    alert.runModal()
-                }
-            }
-        }.resume()
-    }
 
     // MARK: — Notification de démarrage
 

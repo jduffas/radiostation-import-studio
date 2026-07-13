@@ -9,6 +9,7 @@ import RegionsPlugin from './vendor/regions.esm.js'
 
 const $app = document.getElementById('app')
 const $pairingIndicator = document.getElementById('pairing-indicator')
+const $vocalToggle = document.getElementById('vocal-toggle')
 
 let settings = {}
 let currentRipState = null
@@ -72,6 +73,7 @@ async function init() {
     settings = {}
   }
   updatePairingIndicator()
+  $vocalToggle.checked = !!settings.vocal_analysis_enabled
   if (!settings.server_url || !settings.device_token) {
     stopPolling()
     localView = 'not-paired'
@@ -87,6 +89,22 @@ function updatePairingIndicator() {
   const ok = !!(settings.server_url && settings.device_token)
   $pairingIndicator.textContent = ok ? `Connecté à ${settings.server_url}` : 'Non connecté'
   $pairingIndicator.className = 'pairing-indicator ' + (ok ? 'ok' : 'ko')
+}
+
+// Élément statique du topbar (pas recréé par render()) : câblage une seule fois ici plutôt
+// que dans render(), sinon perte du focus/listener à chaque tick de polling.
+$vocalToggle.onchange = async () => {
+  const enabled = $vocalToggle.checked
+  try {
+    settings = await api('/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ vocal_analysis_enabled: enabled }),
+    })
+  } catch (e) {
+    $vocalToggle.checked = !enabled // revert
+    alert("Impossible de sauvegarder le réglage : " + e.message)
+  }
 }
 
 async function tick() {

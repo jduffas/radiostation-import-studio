@@ -85,10 +85,8 @@ class TrayApp : ApplicationContext
             Visible = true,
             Text    = AppName,
         };
-        _tray.DoubleClick += (_, _) => OpenBrowser();
+        _tray.DoubleClick += (_, _) => _ = OpenBrowserAsync();
 
-        // Le serveur démarre avant le menu pour que la lecture de /settings (case
-        // "Analyse vocale") ait une petite longueur d'avance — reste best-effort.
         StartNodeServer();
         _tray.ContextMenuStrip = BuildMenu();
         ShowStartupNotification();
@@ -112,23 +110,8 @@ class TrayApp : ApplicationContext
         menu.Items.Add(importItem);
 
         var openItem = new ToolStripMenuItem("Ouvrir RadioStation dans le navigateur");
-        openItem.Click += (_, _) => OpenBrowser();
+        openItem.Click += (_, _) => _ = OpenBrowserAsync();
         menu.Items.Add(openItem);
-
-        menu.Items.Add(new ToolStripSeparator());
-
-        var vocalItem = new ToolStripMenuItem("Analyse vocale (zones jingle)")
-        {
-            Checked = FetchVocalAnalysisEnabled(),
-            ToolTipText = "Détecter automatiquement les zones sans voix après chaque rip",
-        };
-        vocalItem.Click += (_, _) =>
-        {
-            var enable = !vocalItem.Checked;
-            vocalItem.Checked = enable; // optimiste, comme Electron
-            SetVocalAnalysisEnabled(enable, vocalItem);
-        };
-        menu.Items.Add(vocalItem);
 
         menu.Items.Add(new ToolStripSeparator());
 
@@ -279,50 +262,27 @@ class TrayApp : ApplicationContext
 
     // ── Réglages du serveur local (/settings) ─────────────────────────────────
 
-    /// Lecture synchrone (bloque le thread UI au démarrage, court) de
-    /// `vocal_analysis_enabled` — best-effort, quelques tentatives courtes car
-    /// appelée juste après le lancement du process node (course possible).
-    private static bool FetchVocalAnalysisEnabled()
+    /// `server_url` vient de l'appairage (stocké dans settings.json par ce même endpoint,
+    /// cf. HandlePairingUrlAsync) — plus de saisie manuelle d'adresse côté tray.
+    private static async Task OpenBrowserAsync()
     {
-        for (var attempt = 0; attempt < 3; attempt++)
+        string? serverUrl = null;
+        try
         {
-            if (attempt > 0) System.Threading.Thread.Sleep(200);
-            try
-            {
-                var json = Http.GetStringAsync(SettingsUrl).GetAwaiter().GetResult();
-                using var doc = JsonDocument.Parse(json);
-                if (doc.RootElement.TryGetProperty("vocal_analysis_enabled", out var v))
-                    return v.ValueKind == JsonValueKind.True;
-                return false;
-            }
-            catch { /* serveur pas encore prêt — on retente */ }
+            var json = await Http.GetStringAsync(SettingsUrl);
+            using var doc = JsonDocument.Parse(json);
+            if (doc.RootElement.TryGetProperty("server_url", out var v) && v.ValueKind == JsonValueKind.String)
+                serverUrl = v.GetString();
         }
-        return false;
-    }
+        catch { /* serveur local injoignable — traité comme non appairé */ }
 
-    private static void SetVocalAnalysisEnabled(bool enabled, ToolStripMenuItem sender)
-    {
-        _ = Task.Run(async () =>
+        if (string.IsNullOrEmpty(serverUrl))
         {
-            try
-            {
-                var body = JsonSerializer.Serialize(new { vocal_analysis_enabled = enabled });
-                using var content = new StringContent(body, Encoding.UTF8, "application/json");
-                var resp = await Http.PostAsync(SettingsUrl, content);
-                if (resp.IsSuccessStatusCode) return;
-            }
-            catch { /* fallthrough vers le revert */ }
-
-            // sender n'a pas de handle propre (ToolStripItem) — on marshalle via le
-            // ContextMenuStrip propriétaire, qui lui dérive bien de Control. Cast explicite
-            // vers MethodInvoker requis : une lambda ne se convertit pas implicitement en Delegate.
-            sender.Owner?.Invoke((MethodInvoker)(() =>
-            {
-                sender.Checked = !enabled; // revert
-                MessageBox.Show("Impossible de sauvegarder les paramètres.", AppName,
-                    MessageBoxButtons.OK, MessageBoxIcon.Error);
-            }));
-        });
+            MessageBox.Show("L'application n'est pas encore appairée à RadioStation.", AppName,
+                MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+        Process.Start(new ProcessStartInfo(serverUrl) { UseShellExecute = true });
     }
 
     // ── Appairage autonome (Phase 2c) ─────────────────────────────────────────
@@ -433,12 +393,6 @@ class TrayApp : ApplicationContext
     }
 
     // ── Actions ───────────────────────────────────────────────────────────────
-
-    private static void OpenBrowser()
-    {
-        var url = Environment.GetEnvironmentVariable("RADIOSTATION_URL") ?? "http://localhost:8080";
-        Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
-    }
 
     private void Quit()
     {
