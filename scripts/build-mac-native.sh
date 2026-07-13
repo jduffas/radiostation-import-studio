@@ -30,7 +30,8 @@ swiftc \
   -target "$SWIFT_TARGET" \
   "$ROOT_DIR/swift-tray/App.swift" \
   -o "$APP_BUNDLE/Contents/MacOS/RadioStationCDRipper" \
-  -framework Cocoa
+  -framework Cocoa \
+  -framework WebKit
 
 # ── 2. Info.plist ──────────────────────────────────────────────────────────────
 cat > "$APP_BUNDLE/Contents/Info.plist" << 'PLIST'
