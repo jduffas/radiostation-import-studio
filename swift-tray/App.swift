@@ -72,6 +72,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         btn.toolTip = "RadioStation CD Ripper"
 
         let menu = NSMenu()
+        // Sans ça, AppKit réactive automatiquement tout item ayant une action valide trouvée
+        // sur la chaîne de répondeurs (autoenablesItems = true par défaut) — écrase le
+        // isEnabled = false manuel de updateItem ci-dessous dès qu'AppKit revalide le menu.
+        menu.autoenablesItems = false
 
         let titleItem = NSMenuItem(title: "RadioStation CD Ripper", action: nil, keyEquivalent: "")
         titleItem.isEnabled = false
