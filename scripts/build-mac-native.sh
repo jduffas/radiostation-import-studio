@@ -197,69 +197,26 @@ else
 fi
 
 # ── 7. DMG — mise en page "glisser vers Applications" ───────────────────────────
-# Recette classique (hdiutil RW + AppleScript Finder + reconversion UDZO) : le DMG brut
-# précédent ne montrait que l'app, sans raccourci /Applications ni indication visuelle
-# — pas la convention d'installation macOS habituelle.
+# dmgbuild (Python) plutôt que Finder/AppleScript : 2 échecs CI réels avec la recette classique
+# hdiutil RW + osascript (-1728 "Can't get disk" puis -2700 "introuvable" malgré attente et sans
+# -nobrowse) — le runner GitHub Actions macOS n'a manifestement pas de session Finder pilotable
+# de façon fiable pour cet usage. dmgbuild manipule le DS_Store et le fond directement via
+# hdiutil/SetFile, sans jamais passer par une automatisation Finder — cf. lecture de son code
+# source (aucune référence à Finder/osascript, contrairement à des outils comme create-dmg).
 echo "→ Création du DMG..."
 DMG_PATH="$DIST_DIR/RadioStation-CD-Ripper.dmg"
-STAGING_DIR="$DIST_DIR/dmg-staging"
-TMP_DMG="$DIST_DIR/tmp.dmg"
-rm -rf "$STAGING_DIR"
-rm -f "$TMP_DMG" "$DMG_PATH"
-mkdir -p "$STAGING_DIR/.background"
-cp -R "$APP_BUNDLE" "$STAGING_DIR/"
-ln -s /Applications "$STAGING_DIR/Applications"
-cp "$ROOT_DIR/resources/dmg-background.png" "$STAGING_DIR/.background/background.png"
-
-hdiutil create -volname "$APP_NAME" -srcfolder "$STAGING_DIR" \
-  -ov -format UDRW -fs HFS+ "$TMP_DMG"
-
-MOUNT_DIR=$(mktemp -d)
-# PAS -nobrowse : ce flag masque le volume à Finder ("ne pas le rendre visible dans des
-# applications comme le Finder") — l'AppleScript ci-dessous a justement besoin que Finder le
-# voie. Root cause du -1728 "Can't get disk" en premier run CI réel (v1.5.2).
-hdiutil attach "$TMP_DMG" -mountpoint "$MOUNT_DIR" -quiet
-sleep 2
-
-# Positions {x,y} synchronisées avec resources/dmg-background.png (flèche entre les deux
-# emplacements) — si l'un change, l'autre doit suivre. Boucle d'attente : même sans -nobrowse,
-# Finder peut mettre un instant à notifier le montage (défense en profondeur en plus du sleep).
-osascript <<APPLESCRIPT
-tell application "Finder"
-  set diskTries to 0
-  repeat
-    if (exists disk "$APP_NAME") then exit repeat
-    set diskTries to diskTries + 1
-    if diskTries > 20 then error "Disque \"$APP_NAME\" introuvable par Finder après 10s"
-    delay 0.5
-  end repeat
-  tell disk "$APP_NAME"
-    open
-    set current view of container window to icon view
-    set toolbar visible of container window to false
-    set statusbar visible of container window to false
-    set the bounds of container window to {400, 100, 1060, 500}
-    set theViewOptions to the icon view options of container window
-    set arrangement of theViewOptions to not arranged
-    set icon size of theViewOptions to 128
-    set background picture of theViewOptions to file ".background:background.png"
-    set position of item "$APP_NAME.app" of container window to {180, 190}
-    set position of item "Applications" of container window to {480, 190}
-    close
-    open
-    update without registering applications
-    delay 2
-  end tell
-end tell
-APPLESCRIPT
-
-sync
-hdiutil detach "$MOUNT_DIR" -quiet
-rmdir "$MOUNT_DIR"
-
-hdiutil convert "$TMP_DMG" -format UDZO -ov -o "$DMG_PATH"
-rm -f "$TMP_DMG"
-rm -rf "$STAGING_DIR"
+# venv dédié plutôt que --user : évite toute question de politique "externally-managed-
+# environment" (PEP 668) du Python système du runner, sans dépendre d'un flag pip particulier.
+DMGBUILD_VENV="$DIST_DIR/.dmgbuild-venv"
+python3 -m venv "$DMGBUILD_VENV"
+"$DMGBUILD_VENV/bin/pip" install --quiet dmgbuild
+"$DMGBUILD_VENV/bin/python3" -m dmgbuild \
+  -s "$SCRIPT_DIR/dmg-settings.py" \
+  -D app="$APP_BUNDLE" \
+  -D app_name="$APP_NAME" \
+  -D background="$ROOT_DIR/resources/dmg-background.png" \
+  "$APP_NAME" \
+  "$DMG_PATH"
 
 # ── 8. Notarisation (remplace le hook afterSign d'electron-builder + @electron/notarize) ───────
 # Ignorée si les identifiants Apple ne sont pas fournis (build local sans compte développeur) ou
