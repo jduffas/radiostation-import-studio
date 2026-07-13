@@ -33,8 +33,24 @@ swiftc \
   -framework Cocoa \
   -framework WebKit
 
-# ── 2. Info.plist ──────────────────────────────────────────────────────────────
-cat > "$APP_BUNDLE/Contents/Info.plist" << 'PLIST'
+# ── 2. Icône de l'app (.icns depuis icon.png, 512×512 source) ──────────────────
+echo "→ Génération de l'icône .icns..."
+ICONSET="$DIST_DIR/AppIcon.iconset"
+rm -rf "$ICONSET"
+mkdir -p "$ICONSET"
+for size in 16 32 128 256 512; do
+  sips -z "$size" "$size" "$ROOT_DIR/icon.png" --out "$ICONSET/icon_${size}x${size}.png" > /dev/null
+  double=$((size * 2))
+  sips -z "$double" "$double" "$ROOT_DIR/icon.png" --out "$ICONSET/icon_${size}x${size}@2x.png" > /dev/null
+done
+iconutil -c icns "$ICONSET" -o "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
+rm -rf "$ICONSET"
+
+# ── 3. Info.plist ──────────────────────────────────────────────────────────────
+# Version lue depuis package.json (source de vérité unique, cf. version dans le menu tray/
+# main.js APP_VERSION) — était codée en dur à 1.0.0 ici, jamais mise à jour depuis.
+APP_VERSION=$(node -p "require('$ROOT_DIR/package.json').version")
+cat > "$APP_BUNDLE/Contents/Info.plist" << PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -44,11 +60,13 @@ cat > "$APP_BUNDLE/Contents/Info.plist" << 'PLIST'
     <key>CFBundleName</key>
     <string>RadioStation CD Ripper</string>
     <key>CFBundleVersion</key>
-    <string>1.0.0</string>
+    <string>$APP_VERSION</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.0.0</string>
+    <string>$APP_VERSION</string>
     <key>CFBundleExecutable</key>
     <string>RadioStationCDRipper</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>LSUIElement</key>
     <true/>
     <key>NSHighResolutionCapable</key>
@@ -72,7 +90,7 @@ cat > "$APP_BUNDLE/Contents/Info.plist" << 'PLIST'
 </plist>
 PLIST
 
-# ── 3. Node.js bundlé ──────────────────────────────────────────────────────────
+# ── 4. Node.js bundlé ──────────────────────────────────────────────────────────
 echo "→ Téléchargement Node.js $NODE_VERSION ($NODE_ARCH)..."
 NODE_PKG="node-v${NODE_VERSION}-darwin-${NODE_ARCH}"
 curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/${NODE_PKG}.tar.gz" -o /tmp/node.tar.gz
@@ -81,7 +99,7 @@ cp "/tmp/$NODE_PKG/bin/node" "$APP_BUNDLE/Contents/Resources/node"
 chmod +x "$APP_BUNDLE/Contents/Resources/node"
 rm -rf "/tmp/$NODE_PKG" /tmp/node.tar.gz
 
-# ── 4. main.js + dépendances prod ─────────────────────────────────────────────
+# ── 5. main.js + dépendances prod ─────────────────────────────────────────────
 echo "→ Installation dépendances production..."
 cp "$ROOT_DIR/main.js" "$APP_BUNDLE/Contents/Resources/"
 cp "$ROOT_DIR/package.json" "$APP_BUNDLE/Contents/Resources/"
@@ -89,7 +107,7 @@ cp -r "$ROOT_DIR/local-ui" "$APP_BUNDLE/Contents/Resources/"
 (cd "$ROOT_DIR" && npm ci --omit=dev --silent)
 cp -r "$ROOT_DIR/node_modules" "$APP_BUNDLE/Contents/Resources/"
 
-# ── 4b. Extraction binaires ffmpeg/ffprobe + shims minimalistes ───────────────
+# ── 5b. Extraction binaires ffmpeg/ffprobe + shims minimalistes ───────────────
 echo "→ Extraction binaires ffmpeg/ffprobe (darwin-${NODE_ARCH})..."
 MODS="$APP_BUNDLE/Contents/Resources/node_modules"
 echo "  node_modules avant : $(du -sh "$MODS" | cut -f1)"
@@ -145,7 +163,7 @@ printf '{"name":"ffprobe-static","version":"3.1.0","main":"index.js"}\n' \
 
 echo "  node_modules après  : $(du -sh "$MODS" | cut -f1)"
 
-# ── 5. Signature ───────────────────────────────────────────────────────────────
+# ── 6. Signature ───────────────────────────────────────────────────────────────
 if [ "${APPLE_CERT_AVAILABLE:-false}" = "true" ]; then
   echo "→ Signature codesign..."
   # Trouver l'identité Developer ID Application dans la liste de recherche par défaut —
@@ -178,15 +196,60 @@ else
   echo "→ Signature ignorée (APPLE_CERT_AVAILABLE != true)"
 fi
 
-# ── 6. DMG ─────────────────────────────────────────────────────────────────────
+# ── 7. DMG — mise en page "glisser vers Applications" ───────────────────────────
+# Recette classique (hdiutil RW + AppleScript Finder + reconversion UDZO) : le DMG brut
+# précédent ne montrait que l'app, sans raccourci /Applications ni indication visuelle
+# — pas la convention d'installation macOS habituelle.
 echo "→ Création du DMG..."
 DMG_PATH="$DIST_DIR/RadioStation-CD-Ripper.dmg"
-hdiutil create -volname "$APP_NAME" \
-  -srcfolder "$APP_BUNDLE" \
-  -ov -format UDZO \
-  "$DMG_PATH"
+STAGING_DIR="$DIST_DIR/dmg-staging"
+TMP_DMG="$DIST_DIR/tmp.dmg"
+rm -rf "$STAGING_DIR"
+rm -f "$TMP_DMG" "$DMG_PATH"
+mkdir -p "$STAGING_DIR/.background"
+cp -R "$APP_BUNDLE" "$STAGING_DIR/"
+ln -s /Applications "$STAGING_DIR/Applications"
+cp "$ROOT_DIR/resources/dmg-background.png" "$STAGING_DIR/.background/background.png"
 
-# ── 7. Notarisation (remplace le hook afterSign d'electron-builder + @electron/notarize) ───────
+hdiutil create -volname "$APP_NAME" -srcfolder "$STAGING_DIR" \
+  -ov -format UDRW -fs HFS+ "$TMP_DMG"
+
+MOUNT_DIR=$(mktemp -d)
+hdiutil attach "$TMP_DMG" -mountpoint "$MOUNT_DIR" -nobrowse -quiet
+
+# Positions {x,y} synchronisées avec resources/dmg-background.png (flèche entre les deux
+# emplacements) — si l'un change, l'autre doit suivre.
+osascript <<APPLESCRIPT
+tell application "Finder"
+  tell disk "$APP_NAME"
+    open
+    set current view of container window to icon view
+    set toolbar visible of container window to false
+    set statusbar visible of container window to false
+    set the bounds of container window to {400, 100, 1060, 500}
+    set theViewOptions to the icon view options of container window
+    set arrangement of theViewOptions to not arranged
+    set icon size of theViewOptions to 128
+    set background picture of theViewOptions to file ".background:background.png"
+    set position of item "$APP_NAME.app" of container window to {180, 190}
+    set position of item "Applications" of container window to {480, 190}
+    close
+    open
+    update without registering applications
+    delay 2
+  end tell
+end tell
+APPLESCRIPT
+
+sync
+hdiutil detach "$MOUNT_DIR" -quiet
+rmdir "$MOUNT_DIR"
+
+hdiutil convert "$TMP_DMG" -format UDZO -ov -o "$DMG_PATH"
+rm -f "$TMP_DMG"
+rm -rf "$STAGING_DIR"
+
+# ── 8. Notarisation (remplace le hook afterSign d'electron-builder + @electron/notarize) ───────
 # Ignorée si les identifiants Apple ne sont pas fournis (build local sans compte développeur) ou
 # si l'app n'a pas été signée avec un vrai Developer ID (APPLE_CERT_AVAILABLE != true ci-dessus).
 if [ "${APPLE_CERT_AVAILABLE:-false}" = "true" ] && [ -n "${APPLE_ID:-}" ] && [ -n "${APPLE_APP_SPECIFIC_PASSWORD:-}" ] && [ -n "${APPLE_TEAM_ID:-}" ]; then
