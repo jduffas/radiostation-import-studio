@@ -150,24 +150,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         UserDefaults.standard.set(val, forKey: "radiostation_url")
     }
 
-    // MARK: — Fenêtre d'import CD (webview intégrée, Phase 2b)
+    // MARK: — Fenêtre d'import CD (webview intégrée, interface locale)
 
-    /// Adresse à utiliser pour la webview : priorité au `server_url` connu de main.js (déjà
-    /// résolu si l'app est appairée, Phase 2c) — sinon le réglage manuel classique.
-    private func effectiveRadioStationURL(completion: @escaping (String) -> Void) {
-        var request = URLRequest(url: Self.settingsURL)
-        request.timeoutInterval = 1.0
-        URLSession.shared.dataTask(with: request) { [weak self] data, _, _ in
-            guard let self else { return }
-            if let data,
-               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let serverUrl = json["server_url"] as? String, !serverUrl.isEmpty {
-                completion(serverUrl)
-            } else {
-                completion(self.radioStationURL())
-            }
-        }.resume()
-    }
+    // Page servie directement par main.js (127.0.0.1:19847, cf. local-ui/) — aucune dépendance
+    // réseau au site RadioStation pour l'interface elle-même : détection CD, rip, coupe et cue
+    // points tournent entièrement en local, seul l'envoi final (proxié par main.js avec le
+    // jeton d'appareil déjà appairé) touche le réseau. Remplace l'ancien pointage direct vers
+    // {server_url}/admin/import/cd (site distant complet, cf. historique du plan Phase 2b).
+    private static let localImportURL = URL(string: "http://127.0.0.1:19847/")!
 
     @objc private func openImportWindow() {
         if let window = importWindow {
@@ -175,14 +165,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             window.makeKeyAndOrderFront(nil)
             return
         }
-        effectiveRadioStationURL { [weak self] base in
-            DispatchQueue.main.async { self?.createAndShowImportWindow(base: base) }
-        }
+        createAndShowImportWindow()
     }
 
-    private func createAndShowImportWindow(base: String) {
-        guard let url = URL(string: base + "/admin/import/cd") else { return }
-
+    private func createAndShowImportWindow() {
         let webView = WKWebView(frame: NSRect(x: 0, y: 0, width: 1100, height: 800))
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1100, height: 800),
@@ -195,7 +181,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.isReleasedWhenClosed = false
         window.delegate = self
 
-        webView.load(URLRequest(url: url))
+        webView.load(URLRequest(url: Self.localImportURL))
 
         importWindow = window
         importWebView = webView

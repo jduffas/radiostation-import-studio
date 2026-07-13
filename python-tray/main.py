@@ -161,24 +161,16 @@ def _fetch_vocal_analysis_enabled() -> bool:
         return False
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Fenêtre d'import CD — webview WebKit2GTK intégrée sur /admin/import/cd (Phase 2b)
+# Fenêtre d'import CD — webview WebKit2GTK intégrée sur l'interface locale (servie par ce
+# process lui-même, cf. local-ui/) — aucune dépendance réseau au site RadioStation pour
+# l'interface elle-même : détection CD, rip, coupe et cue points tournent entièrement en
+# local, seul l'envoi final (proxié par ce process avec le jeton d'appareil déjà appairé)
+# touche le réseau. Remplace l'ancien pointage direct vers {server_url}/admin/import/cd
+# (site distant complet, cf. historique du plan Phase 2b).
 # ─────────────────────────────────────────────────────────────────────────────
 
 _import_window = None  # référence module-level : évite le garbage-collect de la fenêtre GTK
-
-
-def _resolve_effective_radiostation_url() -> str:
-    """Priorité au server_url connu de main.js (deja resolu si l'app est appairee, Phase 2c) -
-    sinon repli sur RADIOSTATION_URL/localhost, meme comportement que _open_browser."""
-    try:
-        with urllib.request.urlopen(SETTINGS_URL, timeout=1) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            server_url = data.get("server_url")
-            if server_url:
-                return server_url
-    except (urllib.error.URLError, OSError, ValueError):
-        pass
-    return os.environ.get("RADIOSTATION_URL", "http://localhost:8080")
+_LOCAL_IMPORT_URL = f"http://127.0.0.1:{PORT}/"
 
 
 def _open_import_window(icon, item):
@@ -187,13 +179,11 @@ def _open_import_window(icon, item):
         _import_window.present()
         return
 
-    base_url = _resolve_effective_radiostation_url()
-
     window = Gtk.Window(title="RadioStation — Import CD")
     window.set_default_size(1100, 800)
 
     webview = WebKit2.WebView()
-    webview.load_uri(f"{base_url}/admin/import/cd")
+    webview.load_uri(_LOCAL_IMPORT_URL)
     window.add(webview)
 
     def _on_destroy(_widget):

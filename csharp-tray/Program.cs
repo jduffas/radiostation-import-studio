@@ -410,35 +410,23 @@ class TrayApp : ApplicationContext
         _tray.ShowBalloonTip(4000);
     }
 
-    // ── Fenêtre d'import CD (webview intégrée, Phase 2b) ──────────────────────
+    // ── Fenêtre d'import CD (webview intégrée, interface locale) ──────────────
 
-    // Priorité au server_url connu de main.js (déjà résolu si l'app est appairée, Phase 2c) —
-    // sinon repli sur RADIOSTATION_URL/localhost, comme OpenBrowser().
-    private static async Task<string> ResolveEffectiveRadioStationUrlAsync()
-    {
-        try
-        {
-            var json = await Http.GetStringAsync(SettingsUrl);
-            using var doc = JsonDocument.Parse(json);
-            if (doc.RootElement.TryGetProperty("server_url", out var v) && v.ValueKind == JsonValueKind.String)
-            {
-                var s = v.GetString();
-                if (!string.IsNullOrEmpty(s)) return s!;
-            }
-        }
-        catch { /* repli ci-dessous */ }
-        return Environment.GetEnvironmentVariable("RADIOSTATION_URL") ?? "http://localhost:8080";
-    }
+    // Page servie directement par main.js (127.0.0.1:19847, cf. local-ui/) — aucune dépendance
+    // réseau au site RadioStation pour l'interface elle-même : détection CD, rip, coupe et cue
+    // points tournent entièrement en local, seul l'envoi final (proxié par main.js avec le
+    // jeton d'appareil déjà appairé) touche le réseau. Remplace l'ancien pointage direct vers
+    // {server_url}/admin/import/cd (site distant complet, cf. historique du plan Phase 2b).
+    private const string LocalImportUrl = "http://127.0.0.1:19847/";
 
-    private async void OpenImportWindow()
+    private void OpenImportWindow()
     {
         if (_importWindow is { IsDisposed: false })
         {
             _importWindow.Activate();
             return;
         }
-        var baseUrl = await ResolveEffectiveRadioStationUrlAsync();
-        _importWindow = new ImportWindow(baseUrl + "/admin/import/cd");
+        _importWindow = new ImportWindow(LocalImportUrl);
         _importWindow.FormClosed += (_, _) => _importWindow = null;
         _importWindow.Show();
         _importWindow.Activate();

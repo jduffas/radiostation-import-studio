@@ -783,6 +783,47 @@ function uploadToBackend(backendUrl, authToken, files, metaArr) {
   });
 }
 
+// Finalise un import (POST /api/importer/import distant) — appel serveur-à-serveur, PAS une
+// requête navigateur : évite tout souci de CORS entre la page locale (127.0.0.1:19847) et un
+// backend dont CORS_ORIGINS est configuré de façon restrictive (observé en prod : liste
+// explicite localhost:3000/5173, ne contient pas notre origine locale). Même pattern que
+// uploadToBackend, en JSON plutôt qu'en multipart.
+function proxyImportToBackend(backendUrl, authToken, payload) {
+  const body = JSON.stringify(payload);
+  return new Promise((resolve, reject) => {
+    const u = new URL('/api/importer/import', backendUrl);
+    const port = u.port ? parseInt(u.port, 10) : (u.protocol === 'https:' ? 443 : 80);
+    const opts = {
+      method: 'POST',
+      hostname: u.hostname,
+      port,
+      path: u.pathname + u.search,
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(body),
+        ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+      },
+    };
+    const mod = u.protocol === 'https:' ? https : http;
+    const req = mod.request(opts, res => {
+      let d = '';
+      res.on('data', c => { d += c; });
+      res.on('end', () => {
+        try {
+          const parsed = JSON.parse(d);
+          if (res.statusCode >= 200 && res.statusCode < 300) resolve(parsed);
+          else reject(new Error(parsed.detail || `HTTP ${res.statusCode}`));
+        } catch {
+          reject(new Error(`HTTP ${res.statusCode}: ${d.slice(0, 200)}`));
+        }
+      });
+    });
+    req.on('error', reject);
+    req.write(body);
+    req.end();
+  });
+}
+
 // ============================================================
 // Cache TOC — lu une fois et réutilisé pour le rip
 // ============================================================
@@ -1305,6 +1346,46 @@ const server = http.createServer(async (req, res) => {
       const s = saveSettings(updates);
       jsonResp(res, 200, s);
     });
+    return;
+  }
+
+  // ── Finalisation d'un import (page locale, Phase 2b « interface embarquée ») ─
+  // Proxy serveur-à-serveur vers le vrai backend — cf. proxyImportToBackend (évite CORS).
+  if (req.method === 'POST' && pathname === '/import') {
+    const settings = loadSettings();
+    if (!settings.server_url || !settings.device_token) {
+      return jsonResp(res, 401, { error: "Application non appairée — connectez-la d'abord depuis le site." });
+    }
+    let body = '';
+    req.on('data', c => { body += c; });
+    req.on('end', async () => {
+      let payload = {};
+      try { payload = JSON.parse(body); } catch { /* ignore */ }
+      try {
+        const result = await proxyImportToBackend(settings.server_url, settings.device_token, payload);
+        jsonResp(res, 200, result);
+      } catch (e) {
+        jsonResp(res, 502, { error: e.message });
+      }
+    });
+    return;
+  }
+
+  // ── Page locale d'import (Phase 2b « interface embarquée ») — servie directement par ce
+  // serveur : la webview système pointe ici (127.0.0.1:19847) plutôt que sur le site distant,
+  // pour un import qui ne dépend d'aucune page servie par le Pi (seul l'envoi final y va).
+  if (req.method === 'GET' && (pathname === '/' || pathname.startsWith('/local-ui/'))) {
+    const relPath = pathname === '/' ? 'index.html' : pathname.slice('/local-ui/'.length);
+    const baseDir = path.join(__dirname, 'local-ui');
+    const filePath = path.normalize(path.join(baseDir, relPath));
+    const isInsideBase = filePath === baseDir || filePath.startsWith(baseDir + path.sep);
+    if (!isInsideBase || !fs.existsSync(filePath) || fs.statSync(filePath).isDirectory()) {
+      return jsonResp(res, 404, { error: 'Fichier introuvable' });
+    }
+    const ext = path.extname(filePath);
+    const mime = { '.html': 'text/html', '.js': 'application/javascript', '.css': 'text/css' }[ext] || 'application/octet-stream';
+    res.writeHead(200, { 'Content-Type': mime, ...res.corsHeaders });
+    fs.createReadStream(filePath).pipe(res);
     return;
   }
 
