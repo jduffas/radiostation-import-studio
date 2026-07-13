@@ -83,6 +83,7 @@ rm -rf "/tmp/$NODE_PKG" /tmp/node.tar.gz
 # ── 4. main.js + dépendances prod ─────────────────────────────────────────────
 echo "→ Installation dépendances production..."
 cp "$ROOT_DIR/main.js" "$APP_BUNDLE/Contents/Resources/"
+cp -r "$ROOT_DIR/local-ui" "$APP_BUNDLE/Contents/Resources/"
 (cd "$ROOT_DIR" && npm ci --omit=dev --silent)
 cp -r "$ROOT_DIR/node_modules" "$APP_BUNDLE/Contents/Resources/"
 

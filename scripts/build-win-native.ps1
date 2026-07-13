@@ -41,6 +41,7 @@ Remove-Item $NodeZip, (Join-Path $env:TEMP $NodePkg) -Recurse -Force -ErrorActio
 # ── 3. main.js + dépendances prod ─────────────────────────────────────────────
 Write-Host "→ Installation dépendances Node production..."
 Copy-Item (Join-Path $RootDir "main.js") -Destination $WinDir
+Copy-Item (Join-Path $RootDir "local-ui") -Destination $WinDir -Recurse
 Push-Location $RootDir
 npm ci --omit=dev --silent 2>&1 | Out-Null
 Pop-Location
