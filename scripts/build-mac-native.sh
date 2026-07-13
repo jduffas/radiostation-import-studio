@@ -215,12 +215,24 @@ hdiutil create -volname "$APP_NAME" -srcfolder "$STAGING_DIR" \
   -ov -format UDRW -fs HFS+ "$TMP_DMG"
 
 MOUNT_DIR=$(mktemp -d)
-hdiutil attach "$TMP_DMG" -mountpoint "$MOUNT_DIR" -nobrowse -quiet
+# PAS -nobrowse : ce flag masque le volume à Finder ("ne pas le rendre visible dans des
+# applications comme le Finder") — l'AppleScript ci-dessous a justement besoin que Finder le
+# voie. Root cause du -1728 "Can't get disk" en premier run CI réel (v1.5.2).
+hdiutil attach "$TMP_DMG" -mountpoint "$MOUNT_DIR" -quiet
+sleep 2
 
 # Positions {x,y} synchronisées avec resources/dmg-background.png (flèche entre les deux
-# emplacements) — si l'un change, l'autre doit suivre.
+# emplacements) — si l'un change, l'autre doit suivre. Boucle d'attente : même sans -nobrowse,
+# Finder peut mettre un instant à notifier le montage (défense en profondeur en plus du sleep).
 osascript <<APPLESCRIPT
 tell application "Finder"
+  set diskTries to 0
+  repeat
+    if (exists disk "$APP_NAME") then exit repeat
+    set diskTries to diskTries + 1
+    if diskTries > 20 then error "Disque \"$APP_NAME\" introuvable par Finder après 10s"
+    delay 0.5
+  end repeat
   tell disk "$APP_NAME"
     open
     set current view of container window to icon view
