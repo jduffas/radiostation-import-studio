@@ -25,6 +25,12 @@ const PORT = parseInt(process.env.PORT || '19847', 10);
 const PLATFORM = process.platform; // 'linux' | 'darwin' | 'win32'
 const TMP_DIR = path.join(os.tmpdir(), 'radiostation-cd-ripper');
 
+// package.json copié à côté de main.js par les 3 scripts de build natifs (Resources/ mac,
+// bundle/ linux, dossier win) — fallback 'dev' si absent (ex. main.js déplacé isolément).
+const APP_VERSION = (() => {
+  try { return require('./package.json').version; } catch { return 'dev'; }
+})();
+
 // ============================================================
 // Résolution des chemins ffmpeg/ffprobe
 // Priorité : ffmpeg-static (bundlé Electron) > système
@@ -1110,7 +1116,7 @@ const server = http.createServer(async (req, res) => {
       ok: true, ...cd,
       platform: PLATFORM,
       bundledFfmpeg: BUNDLED_FFMPEG,
-      version: '1.4',
+      version: APP_VERSION,
     });
   }
 

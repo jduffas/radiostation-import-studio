@@ -89,6 +89,7 @@ cp -r "$PY_TRAY_DIST/." "$APPDIR/app/"
 cp "$NODE_BIN"               "$APPDIR/bundle/node"
 chmod +x "$APPDIR/bundle/node"
 cp "$ROOT_DIR/main.js"       "$APPDIR/bundle/"
+cp "$ROOT_DIR/package.json"  "$APPDIR/bundle/"
 cp -r "$ROOT_DIR/local-ui"   "$APPDIR/bundle/"
 cp -r "$ROOT_DIR/node_modules" "$APPDIR/bundle/"
 
