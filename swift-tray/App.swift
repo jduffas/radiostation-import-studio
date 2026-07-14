@@ -91,7 +91,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelega
 
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(
-            title: "Importer…",
+            title: "Nouvel import…",
             action: #selector(openImportWindow),
             keyEquivalent: ""
         ))

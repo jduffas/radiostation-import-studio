@@ -16,7 +16,7 @@ const $pageTitle = document.getElementById('page-title')
 
 // Titre/en-tête dynamiques selon le mode choisi — l'app n'est plus limitée au CD depuis
 // Phase 4 (import de fichiers locaux), le libellé générique par défaut reflète maintenant
-// les deux (cf. aussi le renommage des items de menu tray "Importer un CD…" -> "Importer…").
+// les deux (cf. aussi le renommage des items de menu tray "Importer un CD…" -> "Nouvel import…").
 function updatePageTitle() {
   const label = appMode === 'cd' ? 'Import CD' : appMode === 'files' ? 'Import fichiers' : 'Import'
   const icon = appMode === 'cd' ? '📀' : appMode === 'files' ? '📁' : '📥'

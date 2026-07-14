@@ -123,7 +123,7 @@ class TrayApp : ApplicationContext
         menu.Items.Add(new ToolStripMenuItem($"Version {FetchAppVersion()}") { Enabled = false });
         menu.Items.Add(new ToolStripSeparator());
 
-        var importItem = new ToolStripMenuItem("Importer…");
+        var importItem = new ToolStripMenuItem("Nouvel import…");
         importItem.Click += (_, _) => OpenImportWindow();
         menu.Items.Add(importItem);
 
