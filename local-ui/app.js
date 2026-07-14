@@ -735,10 +735,14 @@ function renderFilesSelect() {
     <div class="card">
       <div class="card-header">Importer des fichiers locaux</div>
       <div class="card-body">
-        <p class="hint">Sélectionnez un ou plusieurs fichiers audio (mp3, wav, flac, m4a…) —
-        conversion, coupe du silence, cue points et analyse (BPM/tonalité/loudness/energy)
-        se font ici, avant l'envoi vers RadioStation.</p>
-        <input type="file" id="files-input" accept="audio/*" multiple>
+        <p class="hint">Sélectionnez ou glissez-déposez un ou plusieurs fichiers audio (mp3,
+        wav, flac, m4a…) — conversion, coupe du silence, cue points et analyse
+        (BPM/tonalité/loudness/energy) se font ici, avant l'envoi vers RadioStation.</p>
+        <div id="files-dropzone" class="dropzone">
+          <p>📁 Glissez-déposez vos fichiers ici<br>ou</p>
+          <label class="btn" for="files-input">Parcourir…</label>
+          <input type="file" id="files-input" accept="audio/*" multiple hidden>
+        </div>
         <div id="files-upload-status"></div>
       </div>
       <div class="actions">
@@ -747,6 +751,27 @@ function renderFilesSelect() {
     </div>`
   document.getElementById('btn-back-mode').onclick = backToModeSelector
   document.getElementById('files-input').onchange = (e) => uploadSelectedFiles(e.target.files)
+
+  const $dropzone = document.getElementById('files-dropzone')
+  let dragCounter = 0 // compte les enter/leave imbriqués (survol d'un enfant) sans faux "leave"
+  $dropzone.addEventListener('dragenter', (e) => {
+    e.preventDefault()
+    dragCounter++
+    $dropzone.classList.add('dropzone-active')
+  })
+  $dropzone.addEventListener('dragover', (e) => e.preventDefault())
+  $dropzone.addEventListener('dragleave', (e) => {
+    e.preventDefault()
+    dragCounter = Math.max(0, dragCounter - 1)
+    if (dragCounter === 0) $dropzone.classList.remove('dropzone-active')
+  })
+  $dropzone.addEventListener('drop', (e) => {
+    e.preventDefault()
+    dragCounter = 0
+    $dropzone.classList.remove('dropzone-active')
+    const files = Array.from(e.dataTransfer?.files || []).filter(f => f.type.startsWith('audio/') || /\.(mp3|wav|flac|m4a|aac|ogg)$/i.test(f.name))
+    if (files.length) uploadSelectedFiles(files)
+  })
 }
 
 async function uploadSelectedFiles(fileList) {

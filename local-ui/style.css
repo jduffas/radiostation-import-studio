@@ -289,9 +289,28 @@ code {
   font-size: 1.05rem;
 }
 
-#files-input {
+.dropzone {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 40px 20px;
+  border: 2px dashed var(--text-dimmer);
+  border-radius: 8px;
+  text-align: center;
+  color: var(--text-dim);
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.dropzone p {
+  margin: 0;
+  line-height: 1.5;
+}
+
+.dropzone-active {
+  border-color: var(--blue);
+  background: rgba(74, 144, 226, 0.08);
   color: var(--text);
-  margin-bottom: 12px;
 }
 
 #files-upload-status {
