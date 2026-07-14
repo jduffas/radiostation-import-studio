@@ -116,7 +116,7 @@ function loadSettings() {
     try {
       return JSON.parse(fs.readFileSync(LEGACY_SETTINGS_PATH, 'utf8'));
     } catch {
-      return { vocal_analysis_enabled: false };
+      return { vocal_analysis_enabled: false, fast_rip_enabled: false };
     }
   }
 }
@@ -742,9 +742,13 @@ setInterval(() => { checkForUpdates(); }, UPDATE_CHECK_TTL_MS);
 // Rip des pistes
 // ============================================================
 
-function ripTrackCdparanoia(trackNum, outPath) {
+function ripTrackCdparanoia(trackNum, outPath, fast = false) {
   return new Promise((resolve, reject) => {
-    const proc = spawn('cdparanoia', [String(trackNum), outPath]);
+    // -Z : désactive toute la correction d'erreur/jitter (paranoia off) — lecture brute,
+    // nettement plus rapide mais sans protection sur CD rayés/anciens. Réglage utilisateur
+    // (settings.fast_rip_enabled), désactivé par défaut.
+    const args = fast ? ['-Z', String(trackNum), outPath] : [String(trackNum), outPath];
+    const proc = spawn('cdparanoia', args);
     let stderr = '';
     proc.stderr.on('data', d => { stderr += d; });
     proc.on('error', reject);
@@ -804,8 +808,9 @@ async function ripTrack(trackNum, outPath, toc = null) {
 
   // Linux standalone → cdparanoia avec fallback ffmpeg
   if (PLATFORM === 'linux') {
+    const fast = !!loadSettings().fast_rip_enabled;
     try {
-      return await ripTrackCdparanoia(trackNum, outPath);
+      return await ripTrackCdparanoia(trackNum, outPath, fast);
     } catch (e) {
       // spawn() (pas de shell) émet ENOENT si le binaire est absent — pas "exit 127"
       if (e.code === 'ENOENT' || e.message.includes('exit 127') || e.message.includes('not found')) {
@@ -1858,6 +1863,7 @@ const server = http.createServer(async (req, res) => {
       // server_url/device_token après un appairage (Phase 2c) — pas seulement vocal_analysis_enabled.
       const updates = {};
       if (payload.vocal_analysis_enabled !== undefined) updates.vocal_analysis_enabled = !!payload.vocal_analysis_enabled;
+      if (payload.fast_rip_enabled !== undefined) updates.fast_rip_enabled = !!payload.fast_rip_enabled;
       if (payload.server_url !== undefined) updates.server_url = String(payload.server_url);
       if (payload.device_token !== undefined) updates.device_token = String(payload.device_token);
       const s = saveSettings(updates);

@@ -12,6 +12,7 @@ import { keyFromChroma } from './vendor/key-detect.js'
 const $app = document.getElementById('app')
 const $pairingIndicator = document.getElementById('pairing-indicator')
 const $vocalToggle = document.getElementById('vocal-toggle')
+const $fastRipToggle = document.getElementById('fast-rip-toggle')
 const $pageTitle = document.getElementById('page-title')
 
 // Titre/en-tête dynamiques selon le mode choisi — l'app n'est plus limitée au CD depuis
@@ -101,6 +102,7 @@ async function init() {
   }
   updatePairingIndicator()
   $vocalToggle.checked = !!settings.vocal_analysis_enabled
+  $fastRipToggle.checked = !!settings.fast_rip_enabled
   if (!settings.server_url || !settings.device_token) {
     stopPolling()
     localView = 'not-paired'
@@ -161,6 +163,20 @@ $vocalToggle.onchange = async () => {
     })
   } catch (e) {
     $vocalToggle.checked = !enabled // revert
+    alert("Impossible de sauvegarder le réglage : " + e.message)
+  }
+}
+
+$fastRipToggle.onchange = async () => {
+  const enabled = $fastRipToggle.checked
+  try {
+    settings = await api('/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fast_rip_enabled: enabled }),
+    })
+  } catch (e) {
+    $fastRipToggle.checked = !enabled // revert
     alert("Impossible de sauvegarder le réglage : " + e.message)
   }
 }
@@ -418,8 +434,9 @@ function renderTrimming() {
         </div>
       </div>
       <p class="hint" style="padding:12px 24px;">
-        <strong>Zone bleue</strong> : glissez les bords pour couper le silence/déchet — coupe
-        définitive, avant l'envoi. <strong>DÉBUT</strong> (cyan) / <strong>TRANSITION</strong>
+        <strong>Zone bleue</strong> (contour bleu, toute la piste par défaut) : glissez ses
+        bords pour couper le silence/déchet — coupe définitive, avant l'envoi.
+        <strong>DÉBUT</strong> (cyan) / <strong>TRANSITION</strong>
         (rouge) : cue points, ni l'un ni l'autre n'est obligatoire, affinables après import.
       </p>
       <div class="actions">
@@ -520,16 +537,28 @@ function onRegionMoved(region) {
   const dur = wavesurfer.getDuration()
 
   if (region.id === 'trim-keep') {
+    const prevStart = trimMarkers.trimStart
+    const prevEnd = trimMarkers.trimEnd
     const start = Math.max(0, Math.min(region.start, dur - 0.2))
     const end = Math.max(start + 0.2, Math.min(region.end, dur))
     trimMarkers.trimStart = start
     trimMarkers.trimEnd = end
+    // Les marqueurs DÉBUT/TRANSITION suivent le bord qu'ils accompagnent (delta, pas un
+    // simple clamp) : sinon, resserrer puis rouvrir la zone bleue faisait "sauter" la durée
+    // affichée (clampCueMarkers écrasait cueOutPos de façon irréversible en rétrécissant,
+    // sans jamais le restaurer en ré-agrandissant).
+    trimMarkers.cueInPos += start - prevStart
+    trimMarkers.cueOutPos += end - prevEnd
     if (Math.abs(region.start - start) > 0.01 || Math.abs(region.end - end) > 0.01) {
       trimMarkers.updating = true
       region.setOptions({ start, end })
       trimMarkers.updating = false
     }
     clampCueMarkers()
+    trimMarkers.updating = true
+    trimMarkers.cueInRegion?.setOptions({ start: trimMarkers.cueInPos })
+    trimMarkers.cueOutRegion?.setOptions({ start: trimMarkers.cueOutPos })
+    trimMarkers.updating = false
   } else if (region.id === 'cue-in') {
     const clamped = Math.max(trimMarkers.trimStart, Math.min(region.start, trimMarkers.cueOutPos - 0.1))
     trimMarkers.cueInPos = clamped
@@ -851,8 +880,9 @@ function renderFilesTrimming() {
         <div class="summary-item">Tonalité : <strong id="sum-key">—</strong></div>
       </div>
       <p class="hint" style="padding:12px 24px;">
-        <strong>Zone bleue</strong> : glissez les bords pour couper le silence/déchet — coupe
-        définitive, avant l'envoi. <strong>DÉBUT</strong> (cyan) / <strong>TRANSITION</strong>
+        <strong>Zone bleue</strong> (contour bleu, toute la piste par défaut) : glissez ses
+        bords pour couper le silence/déchet — coupe définitive, avant l'envoi.
+        <strong>DÉBUT</strong> (cyan) / <strong>TRANSITION</strong>
         (rouge) : cue points, ni l'un ni l'autre n'est obligatoire, affinables après import.
         « Détecter automatiquement » propose des positions à partir des silences détectés.
         BPM et tonalité sont calculés automatiquement sur la piste entière.

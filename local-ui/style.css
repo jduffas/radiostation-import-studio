@@ -159,6 +159,42 @@ main {
   background: #000;
 }
 
+/* Tête de lecture : le style par défaut de wavesurfer (trait fin gris clair) se noie dans
+   les régions colorées — triangle repère + couleur vive pour la rendre reconnaissable. */
+#waveform ::part(cursor) {
+  background-color: #ffd600 !important;
+  width: 2px !important;
+}
+#waveform ::part(cursor)::after {
+  content: "";
+  position: absolute;
+  top: -9px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 0;
+  height: 0;
+  border-left: 6px solid transparent;
+  border-right: 6px solid transparent;
+  border-top: 8px solid #ffd600;
+}
+
+/* Zone bleue (trim-keep) : contour visible même à pleine largeur (sinon "tout est bleu"
+   sans bord repérable) ; poignées de bord passées au gris clair et sous les marqueurs
+   DÉBUT/TRANSITION en z-index — par défaut elles se superposaient pixel pour pixel avec le
+   marqueur TRANSITION en bord de piste, et gagnaient le survol/drag (z-index plus élevé),
+   ce qui faisait déplacer le bord de coupe au lieu du point de transition attendu. */
+#waveform [part~="trim-keep"] {
+  border-top: 2px solid rgba(74, 144, 226, 0.6) !important;
+  border-bottom: 2px solid rgba(74, 144, 226, 0.6) !important;
+}
+#waveform [part~="region-handle"] {
+  z-index: 1 !important;
+  border-color: rgba(255, 255, 255, 0.55) !important;
+}
+#waveform [part~="marker"] {
+  z-index: 4 !important;
+}
+
 .controls-bar {
   display: flex;
   justify-content: space-between;
