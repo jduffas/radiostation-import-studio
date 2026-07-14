@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # build-linux-native.sh — Build Linux natif (Python pystray + Node.js bundlé + AppImage)
-# Sortie : dist-native/RadioStation-CD-Ripper.AppImage (~200 Mo vs ~350 Mo Electron)
+# Sortie : dist-native/RadioStation-Import-Studio.AppImage (~200 Mo vs ~350 Mo Electron)
 # Usage  : ./scripts/build-linux-native.sh [x64|arm64]
 set -euo pipefail
 
@@ -62,7 +62,7 @@ python3 -m nuitka \
     --nofollow-import-to=PyQt5 \
     --lto=no \
     --output-dir="$NUITKA_OUT" \
-    --output-filename=radiostation-cd-ripper \
+    --output-filename=radiostation-import-studio \
     "$ROOT_DIR/python-tray/main.py"
 PY_TRAY_DIST="$NUITKA_OUT/main.dist"
 
@@ -146,21 +146,21 @@ draw = ImageDraw.Draw(img)
 draw.ellipse((8, 8, 248, 248),   fill=(15, 76, 117))
 draw.ellipse((88, 88, 168, 168), fill=(255, 255, 255))
 draw.ellipse((112, 112, 144, 144), fill=(15, 76, 117))
-img.save("$APPDIR/radiostation-cd-ripper.png")
+img.save("$APPDIR/radiostation-import-studio.png")
 PYICON
 
-# .desktop — %u transmet le lien radiostation-cdripper://... en argv (appairage, Phase 2c).
+# .desktop — %u transmet le lien radiostation-importstudio://... en argv (appairage, Phase 2c).
 # L'intégration MIME d'une AppImage dépend de l'installation (appimaged, associations
 # manuelles) — pas garantie out-of-the-box sur toutes les distros, best-effort comme le reste
 # de la distribution AppImage.
-cat > "$APPDIR/radiostation-cd-ripper.desktop" << 'DESKTOP'
+cat > "$APPDIR/radiostation-import-studio.desktop" << 'DESKTOP'
 [Desktop Entry]
 Type=Application
-Name=RadioStation CD Ripper
-Exec=radiostation-cd-ripper %u
-Icon=radiostation-cd-ripper
+Name=RadioStation Import Studio
+Exec=radiostation-import-studio %u
+Icon=radiostation-import-studio
 Categories=AudioVideo;Audio;
-MimeType=x-scheme-handler/radiostation-cdripper;
+MimeType=x-scheme-handler/radiostation-importstudio;
 DESKTOP
 
 # AppRun — point d'entrée de l'AppImage
@@ -173,7 +173,7 @@ HERE="${SELF%/*}"
 # Indiquer à l'app Python où se trouvent node, main.js et node_modules
 export RADIOSTATION_BUNDLE_DIR="$HERE/bundle"
 
-exec "$HERE/app/radiostation-cd-ripper" "$@"
+exec "$HERE/app/radiostation-import-studio" "$@"
 APPRUN
 chmod +x "$APPDIR/AppRun"
 
@@ -191,12 +191,12 @@ if [ ! -f "$APPIMAGETOOL" ]; then
     chmod +x "$APPIMAGETOOL"
 fi
 
-ARCH="$APPIMAGE_ARCH" "$APPIMAGETOOL" --no-appstream "$APPDIR" "$DIST_DIR/RadioStation-CD-Ripper.AppImage"
+ARCH="$APPIMAGE_ARCH" "$APPIMAGETOOL" --no-appstream "$APPDIR" "$DIST_DIR/RadioStation-Import-Studio.AppImage"
 
 # Nettoyage
 rm -rf "$NUITKA_OUT" "$APPDIR"
 rm -f /tmp/node.tar.gz "/tmp/$NODE_PKG" 2>/dev/null || true
 
 echo ""
-echo "✓ Build terminé : $DIST_DIR/RadioStation-CD-Ripper.AppImage"
-du -sh "$DIST_DIR/RadioStation-CD-Ripper.AppImage"
+echo "✓ Build terminé : $DIST_DIR/RadioStation-Import-Studio.AppImage"
+du -sh "$DIST_DIR/RadioStation-Import-Studio.AppImage"

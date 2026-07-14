@@ -5,8 +5,8 @@
     <UseWindowsForms>true</UseWindowsForms>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
-    <AssemblyName>RadioStationCDRipper</AssemblyName>
-    <RootNamespace>RadioStationCDRipper</RootNamespace>
+    <AssemblyName>RadioStationImportStudio</AssemblyName>
+    <RootNamespace>RadioStationImportStudio</RootNamespace>
     <!-- Single-file self-contained — pas de dépendance .NET sur la machine cible -->
     <PublishSingleFile>true</PublishSingleFile>
     <SelfContained>true</SelfContained>

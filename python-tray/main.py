@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""RadioStation CD Ripper — tray Linux (pystray + Pillow)"""
+"""RadioStation Import Studio — tray Linux (pystray + Pillow)"""
 
 import json
 import os
@@ -33,9 +33,9 @@ from gi.repository import Gtk, WebKit2  # noqa: E402
 # racine du bundle AppImage où se trouvent node, main.js et node_modules.
 # ─────────────────────────────────────────────────────────────────────────────
 
-APP_NAME     = "RadioStation CD Ripper"
+APP_NAME     = "RadioStation Import Studio"
 PORT         = 19847
-BUNDLE_ID    = "fr.radiostation.cd-ripper"
+BUNDLE_ID    = "fr.radiostation.import-studio"
 SETTINGS_URL = f"http://127.0.0.1:{PORT}/settings"
 STATUS_URL   = f"http://127.0.0.1:{PORT}/status"
 UPDATE_CHECK_URL = f"http://127.0.0.1:{PORT}/update-check"
@@ -94,7 +94,7 @@ def _start_node_server():
 
     env = os.environ.copy()
 
-    # Log dans ~/.cache/fr.radiostation.cd-ripper/server.log
+    # Log dans ~/.cache/fr.radiostation.import-studio/server.log
     log_dir = Path.home() / ".cache" / BUNDLE_ID
     log_dir.mkdir(parents=True, exist_ok=True)
     log_fh = open(log_dir / "server.log", "a")
@@ -182,7 +182,7 @@ def _open_import_window(icon, item):
     _import_window = window
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Appairage autonome (Phase 2c) — radiostation-cdripper://pair?server=…&code=…
+# Appairage autonome (Phase 2c) — radiostation-importstudio://pair?server=…&code=…
 #
 # Linux n'a pas d'équivalent OS natif à second-instance (Windows)/open-url (macOS) : le
 # gestionnaire de MimeType x-scheme-handler relance un nouveau process avec le lien en argv à
@@ -195,7 +195,7 @@ _PAIRING_SOCKET_PATH = Path.home() / ".cache" / BUNDLE_ID / "pairing.sock"
 
 def _extract_pairing_url(argv) -> "str | None":
     for arg in argv:
-        if arg.startswith("radiostation-cdripper://"):
+        if arg.startswith("radiostation-importstudio://"):
             return arg
     return None
 
@@ -223,7 +223,7 @@ def _handle_pairing_url(url: str, icon=None):
     try:
         body = json.dumps({"code": code, "platform": "linux", "label": socket.gethostname()}).encode("utf-8")
         req = urllib.request.Request(
-            f"{server}/api/importer/cd-ripper/pair/exchange", data=body, method="POST",
+            f"{server}/api/importer/import-studio/pair/exchange", data=body, method="POST",
             headers={"Content-Type": "application/json"},
         )
         with urllib.request.urlopen(req, timeout=10) as resp:
@@ -414,7 +414,7 @@ def _trigger_update(icon, item):
     # l'application n'est pas encore appairée.
     server_url = _fetch_paired_server_url()
     target = f"{server_url.rstrip('/')}/admin/import/cd" if server_url \
-        else "https://github.com/jduffas/radiostation-cd-ripper/releases/latest"
+        else "https://github.com/jduffas/radiostation-import-studio/releases/latest"
     subprocess.Popen(["xdg-open", target])
 
 

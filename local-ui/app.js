@@ -1,4 +1,4 @@
-// RadioStation CD Ripper — interface locale embarquée (Phase 2b « interface embarquée »)
+// RadioStation Import Studio — interface locale embarquée (Phase 2b « interface embarquée »)
 //
 // Servie directement par main.js (127.0.0.1:19847) — aucune dépendance réseau au site
 // RadioStation pour l'interface elle-même : détection CD, rip, coupe du silence et cue points

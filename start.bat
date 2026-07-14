@@ -1,5 +1,5 @@
 @echo off
-title RadioStation CD Ripper
+title RadioStation Import Studio
 cd /d "%~dp0"
 
 where node >nul 2>&1
@@ -18,6 +18,6 @@ if errorlevel 1 (
     exit /b 1
 )
 
-echo RadioStation CD Ripper - demarrage...
+echo RadioStation Import Studio - demarrage...
 node main.js
 pause

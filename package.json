@@ -1,7 +1,7 @@
 {
-  "name": "radiostation-cd-ripper",
+  "name": "radiostation-import-studio",
   "version": "1.5.5",
-  "description": "Import CD vers RadioStation — application autonome",
+  "description": "RadioStation Import Studio — import CD vers RadioStation, application autonome",
   "author": "RadioStation",
   "scripts": {
     "start": "node main.js",

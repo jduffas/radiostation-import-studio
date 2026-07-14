@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * RadioStation CD Ripper — serveur HTTP local (port 19847)
+ * RadioStation Import Studio — serveur HTTP local (port 19847)
  *
  * Fonctionne de deux façons :
  *   - `node main.js`          → standalone, utilise ffmpeg du système
@@ -23,7 +23,7 @@ const { URL } = require('node:url');
 
 const PORT = parseInt(process.env.PORT || '19847', 10);
 const PLATFORM = process.platform; // 'linux' | 'darwin' | 'win32'
-const TMP_DIR = path.join(os.tmpdir(), 'radiostation-cd-ripper');
+const TMP_DIR = path.join(os.tmpdir(), 'radiostation-import-studio');
 
 // package.json copié à côté de main.js par les 3 scripts de build natifs (Resources/ mac,
 // bundle/ linux, dossier win) — fallback 'dev' si absent (ex. main.js déplacé isolément).
@@ -92,14 +92,23 @@ function sleep(ms) {
 // Paramètres persistants
 // ============================================================
 
-const SETTINGS_DIR = path.join(os.homedir(), '.radiostation-cd-ripper');
+const SETTINGS_DIR = path.join(os.homedir(), '.radiostation-import-studio');
 const SETTINGS_PATH = path.join(SETTINGS_DIR, 'settings.json');
+// Ancien dossier (avant renommage "CD Ripper" -> "Import Studio", 14 juillet 2026) : lu en
+// repli une seule fois si le nouveau dossier n'a pas encore de settings.json, pour ne pas
+// perdre un appairage device_token déjà réalisé (ex. Mac de test) lors de la mise à jour de
+// l'app. Jamais écrit ; la prochaine sauvegarde va dans SETTINGS_PATH.
+const LEGACY_SETTINGS_PATH = path.join(os.homedir(), '.radiostation-cd-ripper', 'settings.json');
 
 function loadSettings() {
   try {
     return JSON.parse(fs.readFileSync(SETTINGS_PATH, 'utf8'));
   } catch {
-    return { vocal_analysis_enabled: false };
+    try {
+      return JSON.parse(fs.readFileSync(LEGACY_SETTINGS_PATH, 'utf8'));
+    } catch {
+      return { vocal_analysis_enabled: false };
+    }
   }
 }
 
@@ -608,7 +617,7 @@ async function mbGet(apiPath) {
       hostname: 'musicbrainz.org',
       path: `/ws/2${apiPath}`,
       headers: {
-        'User-Agent': 'RadioStation-CDRipper/1.0 (cd-ripper@radiostation.local)',
+        'User-Agent': 'RadioStation-ImportStudio/1.0 (import-studio@radiostation.local)',
         'Accept': 'application/json',
       },
     };
@@ -651,7 +660,7 @@ async function lookupMb(discId) {
 // Vérification de mise à jour (GitHub releases, repo public — pas de token requis)
 // ============================================================
 
-const GITHUB_REPO = 'jduffas/radiostation-cd-ripper';
+const GITHUB_REPO = 'jduffas/radiostation-import-studio';
 const UPDATE_CHECK_TTL_MS = 6 * 60 * 60 * 1000; // 6h — évite de solliciter l'API GitHub à
 // chaque ouverture de menu (limite 60 req/h non-authentifiée par IP)
 
@@ -678,7 +687,7 @@ function fetchLatestReleaseVersion() {
       hostname: 'api.github.com',
       path: `/repos/${GITHUB_REPO}/releases/latest`,
       headers: {
-        'User-Agent': 'RadioStation-CDRipper',
+        'User-Agent': 'RadioStation-ImportStudio',
         'Accept': 'application/vnd.github+json',
       },
       timeout: 5000,
@@ -1486,7 +1495,7 @@ const server = http.createServer(async (req, res) => {
 // ============================================================
 
 server.listen(PORT, '127.0.0.1', () => {
-  console.log(`RadioStation CD Ripper v1.4 — http://127.0.0.1:${PORT}`);
+  console.log(`RadioStation Import Studio v${APP_VERSION} — http://127.0.0.1:${PORT}`);
   console.log(`Plateforme : ${PLATFORM} | ffmpeg bundlé : ${BUNDLED_FFMPEG}`);
   if (PLATFORM === 'win32') console.log(`Lecteur CD : ${getCdDevice()}`);
 });

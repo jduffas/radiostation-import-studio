@@ -11,5 +11,5 @@ if ! command -v ffmpeg &>/dev/null; then
     exit 1
 fi
 
-echo "RadioStation CD Ripper — démarrage..."
+echo "RadioStation Import Studio — démarrage..."
 node main.js

@@ -119,9 +119,9 @@ jobs:
       - name: Créer la release GitHub
         uses: softprops/action-gh-release@v2
         with:
-          name: RadioStation CD Ripper ${{ github.ref_name }}
+          name: RadioStation Import Studio ${{ github.ref_name }}
           body: |
-            ## RadioStation CD Ripper ${{ github.ref_name }}
+            ## RadioStation Import Studio ${{ github.ref_name }}
 
             Application autonome pour importer des CD audio dans RadioStation — coquille native
             par OS (Swift/AppKit, C#/WinForms, Python/pystray), `main.js` (Node) partagé.

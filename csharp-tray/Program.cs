@@ -12,7 +12,7 @@ using System.Windows.Forms;
 using Microsoft.Web.WebView2.WinForms;
 using Microsoft.Win32;
 
-namespace RadioStationCDRipper;
+namespace RadioStationImportStudio;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Point d'entrée
@@ -21,16 +21,16 @@ namespace RadioStationCDRipper;
 static class Program
 {
     // Appairage autonome (Phase 2c) : Windows relance l'exe avec le lien
-    // radiostation-cdripper://... en argument (enregistré via installer.nsi) — pas d'event
+    // radiostation-importstudio://... en argument (enregistré via installer.nsi) — pas d'event
     // dédié comme macOS/open-url. Un Mutex nommé assure une seule instance ; la 2e invocation
     // transmet le lien à la 1ère via named pipe puis se termine immédiatement.
-    private const string MutexName = "Global\\RadioStationCDRipperSingleInstance";
-    internal const string PipeName = "RadioStationCDRipperPairingPipe";
+    private const string MutexName = "Global\\RadioStationImportStudioSingleInstance";
+    internal const string PipeName = "RadioStationImportStudioPairingPipe";
 
     [STAThread]
     static void Main(string[] args)
     {
-        var pairingUrl = Array.Find(args, a => a.StartsWith("radiostation-cdripper://", StringComparison.OrdinalIgnoreCase));
+        var pairingUrl = Array.Find(args, a => a.StartsWith("radiostation-importstudio://", StringComparison.OrdinalIgnoreCase));
 
         using var mutex = new Mutex(initiallyOwned: true, MutexName, out var isFirstInstance);
         if (!isFirstInstance)
@@ -71,9 +71,9 @@ class TrayApp : ApplicationContext
     private System.Windows.Forms.Timer? _updatePollTimer;
 
     private const int    Port          = 19847;
-    private const string AppName       = "RadioStation CD Ripper";
+    private const string AppName       = "RadioStation Import Studio";
     private const string RegRunKey     = @"Software\Microsoft\Windows\CurrentVersion\Run";
-    private const string RegRunValue   = "RadioStationCDRipper";
+    private const string RegRunValue   = "RadioStationImportStudio";
 
     private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromMilliseconds(600) };
     // Timeout plus long dédié : /update-check peut relayer un appel réel à l'API GitHub côté
@@ -189,10 +189,10 @@ class TrayApp : ApplicationContext
             return;
         }
 
-        // Log dans %LOCALAPPDATA%\fr.radiostation.cd-ripper\server.log
+        // Log dans %LOCALAPPDATA%\fr.radiostation.import-studio\server.log
         var logDir  = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "fr.radiostation.cd-ripper");
+            "fr.radiostation.import-studio");
         Directory.CreateDirectory(logDir);
         var logPath = Path.Combine(logDir, "server.log");
 
@@ -412,7 +412,7 @@ class TrayApp : ApplicationContext
         var serverUrl = await FetchPairedServerUrlAsync();
         var target = !string.IsNullOrEmpty(serverUrl)
             ? $"{serverUrl.TrimEnd('/')}/admin/import/cd"
-            : "https://github.com/jduffas/radiostation-cd-ripper/releases/latest";
+            : "https://github.com/jduffas/radiostation-import-studio/releases/latest";
         Process.Start(new ProcessStartInfo(target) { UseShellExecute = true });
     }
 
@@ -452,7 +452,7 @@ class TrayApp : ApplicationContext
         {
             var body = JsonSerializer.Serialize(new { code, platform = "win32", label = Environment.MachineName });
             using var content = new StringContent(body, Encoding.UTF8, "application/json");
-            using var resp = await Http.PostAsync($"{server}/api/importer/cd-ripper/pair/exchange", content);
+            using var resp = await Http.PostAsync($"{server}/api/importer/import-studio/pair/exchange", content);
             if (!resp.IsSuccessStatusCode) throw new Exception($"HTTP {(int)resp.StatusCode}");
             var json = await resp.Content.ReadAsStringAsync();
             using var doc = JsonDocument.Parse(json);
@@ -574,7 +574,7 @@ class ImportWindow : Form
             {
                 MessageBox.Show(
                     "Impossible d'initialiser WebView2 (runtime absent ?) :\n" + e.Message,
-                    "RadioStation CD Ripper", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    "RadioStation Import Studio", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         };
     }

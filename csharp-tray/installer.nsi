@@ -1,12 +1,12 @@
-; installer.nsi — NSIS installer RadioStation CD Ripper (Windows)
+; installer.nsi — NSIS installer RadioStation Import Studio (Windows)
 ; Usage : makensis installer.nsi  (depuis le dossier dist-native\win\)
 
 Unicode true
 !include "MUI2.nsh"
 
-Name      "RadioStation CD Ripper"
-OutFile   "..\RadioStation-CD-Ripper-Setup.exe"
-InstallDir "$LOCALAPPDATA\RadioStation CD Ripper"
+Name      "RadioStation Import Studio"
+OutFile   "..\RadioStation-Import-Studio-Setup.exe"
+InstallDir "$LOCALAPPDATA\RadioStation Import Studio"
 RequestExecutionLevel user   ; pas besoin de droits admin
 
 !insertmacro MUI_PAGE_INSTFILES
@@ -21,32 +21,32 @@ Section "Install"
   SetOutPath "$INSTDIR"
 
   ; Exécutable tray, Node.js, code serveur
-  File "RadioStationCDRipper.exe"
+  File "RadioStationImportStudio.exe"
   File "node.exe"
   File "main.js"
   File /r "node_modules"
 
   ; Raccourci Menu Démarrer
   CreateDirectory "$SMPROGRAMS\RadioStation"
-  CreateShortcut  "$SMPROGRAMS\RadioStation\RadioStation CD Ripper.lnk" \
-                  "$INSTDIR\RadioStationCDRipper.exe"
+  CreateShortcut  "$SMPROGRAMS\RadioStation\RadioStation Import Studio.lnk" \
+                  "$INSTDIR\RadioStationImportStudio.exe"
 
   ; Désinstalleur
   WriteUninstaller "$INSTDIR\uninstall.exe"
-  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\RadioStationCDRipper" \
-              "DisplayName" "RadioStation CD Ripper"
-  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\RadioStationCDRipper" \
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\RadioStationImportStudio" \
+              "DisplayName" "RadioStation Import Studio"
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\RadioStationImportStudio" \
               "UninstallString" "$INSTDIR\uninstall.exe"
 
-  ; Schéma d'URL radiostation-cdripper:// (appairage autonome, Phase 2c) — équivalent Windows
+  ; Schéma d'URL radiostation-importstudio:// (appairage autonome, Phase 2c) — équivalent Windows
   ; du CFBundleURLTypes macOS / protocols electron-builder retirés avec Electron.
-  WriteRegStr HKCU "Software\Classes\radiostation-cdripper" "" "URL:RadioStation CD Ripper Pairing"
-  WriteRegStr HKCU "Software\Classes\radiostation-cdripper" "URL Protocol" ""
-  WriteRegStr HKCU "Software\Classes\radiostation-cdripper\shell\open\command" "" \
-              '"$INSTDIR\RadioStationCDRipper.exe" "%1"'
+  WriteRegStr HKCU "Software\Classes\radiostation-importstudio" "" "URL:RadioStation Import Studio Pairing"
+  WriteRegStr HKCU "Software\Classes\radiostation-importstudio" "URL Protocol" ""
+  WriteRegStr HKCU "Software\Classes\radiostation-importstudio\shell\open\command" "" \
+              '"$INSTDIR\RadioStationImportStudio.exe" "%1"'
 
   ; Lancer l'application après installation
-  Exec "$INSTDIR\RadioStationCDRipper.exe"
+  Exec "$INSTDIR\RadioStationImportStudio.exe"
 SectionEnd
 
 ; ─────────────────────────────────────────────────────────────────────────────
@@ -55,15 +55,15 @@ SectionEnd
 
 Section "Uninstall"
   ; Arrêter le processus en cours
-  nsExec::Exec 'taskkill /f /im RadioStationCDRipper.exe'
+  nsExec::Exec 'taskkill /f /im RadioStationImportStudio.exe'
 
   ; Supprimer les fichiers
   RMDir /r "$INSTDIR"
-  Delete   "$SMPROGRAMS\RadioStation\RadioStation CD Ripper.lnk"
+  Delete   "$SMPROGRAMS\RadioStation\RadioStation Import Studio.lnk"
   RMDir    "$SMPROGRAMS\RadioStation"
 
   ; Nettoyer le registre
-  DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "RadioStationCDRipper"
-  DeleteRegKey   HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\RadioStationCDRipper"
-  DeleteRegKey   HKCU "Software\Classes\radiostation-cdripper"
+  DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "RadioStationImportStudio"
+  DeleteRegKey   HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\RadioStationImportStudio"
+  DeleteRegKey   HKCU "Software\Classes\radiostation-importstudio"
 SectionEnd

@@ -41,7 +41,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             self?.refreshUpdateAvailability()
         }
 
-        // Appairage autonome (Phase 2c) : radiostation-cdripper://pair?server=…&code=…
+        // Appairage autonome (Phase 2c) : radiostation-importstudio://pair?server=…&code=…
         // reçu comme Apple Event standard (kAEGetURL) — mécanisme historique AppKit pour les
         // schémas d'URL personnalisés, fonctionne que l'app soit déjà lancée ou non.
         NSAppleEventManager.shared().setEventHandler(
@@ -64,12 +64,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard let btn = statusItem.button else { return }
 
         if #available(macOS 11.0, *) {
-            btn.image = NSImage(systemSymbolName: "opticaldisc", accessibilityDescription: "CD Ripper")
+            btn.image = NSImage(systemSymbolName: "opticaldisc", accessibilityDescription: "RadioStation Import Studio")
             btn.image?.isTemplate = true
         } else {
             btn.title = "CD"
         }
-        btn.toolTip = "RadioStation CD Ripper"
+        btn.toolTip = "RadioStation Import Studio"
 
         let menu = NSMenu()
         // Sans ça, AppKit réactive automatiquement tout item ayant une action valide trouvée
@@ -77,7 +77,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // isEnabled = false manuel de updateItem ci-dessous dès qu'AppKit revalide le menu.
         menu.autoenablesItems = false
 
-        let titleItem = NSMenuItem(title: "RadioStation CD Ripper", action: nil, keyEquivalent: "")
+        let titleItem = NSMenuItem(title: "RadioStation Import Studio", action: nil, keyEquivalent: "")
         titleItem.isEnabled = false
         menu.addItem(titleItem)
 
@@ -274,7 +274,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         fetchPairedServerURL { serverURL in
             DispatchQueue.main.async {
                 let target = serverURL?.appendingPathComponent("admin/import/cd")
-                    ?? URL(string: "https://github.com/jduffas/radiostation-cd-ripper/releases/latest")!
+                    ?? URL(string: "https://github.com/jduffas/radiostation-import-studio/releases/latest")!
                 NSWorkspace.shared.open(target)
             }
         }
@@ -342,7 +342,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         center.requestAuthorization(options: [.alert]) { granted, _ in
             guard granted else { return }
             let content = UNMutableNotificationContent()
-            content.title = "RadioStation CD Ripper"
+            content.title = "RadioStation Import Studio"
             content.body  = "Serveur démarré — vous pouvez importer des CD depuis RadioStation."
             let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
             center.add(request)
@@ -353,7 +353,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     private var launchAgentURL: URL {
         FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("LaunchAgents/fr.radiostation.cd-ripper.plist")
+            .appendingPathComponent("LaunchAgents/fr.radiostation.import-studio.plist")
     }
 
     private func isLoginItemEnabled() -> Bool {
@@ -368,7 +368,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>Label</key><string>fr.radiostation.cd-ripper</string>
+    <key>Label</key><string>fr.radiostation.import-studio</string>
     <key>ProgramArguments</key>
     <array><string>\(exe)</string></array>
     <key>RunAtLoad</key><true/>
@@ -396,7 +396,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard let comps = URLComponents(url: url, resolvingAgainstBaseURL: false),
               let server = comps.queryItems?.first(where: { $0.name == "server" })?.value,
               let code = comps.queryItems?.first(where: { $0.name == "code" })?.value,
-              let exchangeURL = URL(string: "\(server)/api/importer/cd-ripper/pair/exchange") else { return }
+              let exchangeURL = URL(string: "\(server)/api/importer/import-studio/pair/exchange") else { return }
 
         var request = URLRequest(url: exchangeURL)
         request.httpMethod = "POST"
@@ -433,7 +433,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private func notifyPairingResult(success: Bool) {
         let center = UNUserNotificationCenter.current()
         let content = UNMutableNotificationContent()
-        content.title = "RadioStation CD Ripper"
+        content.title = "RadioStation Import Studio"
         content.body = success
             ? "Application connectée à RadioStation."
             : "Échec de la connexion — réessayez depuis la page web."
@@ -454,9 +454,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // cwd = Resources/ pour que require('ffmpeg-static') trouve node_modules/
         process.currentDirectoryURL = Bundle.main.resourceURL
 
-        // Log dans ~/Library/Caches/fr.radiostation.cd-ripper/server.log
+        // Log dans ~/Library/Caches/fr.radiostation.import-studio/server.log
         let logDir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("fr.radiostation.cd-ripper")
+            .appendingPathComponent("fr.radiostation.import-studio")
         try? FileManager.default.createDirectory(at: logDir, withIntermediateDirectories: true)
         let logURL = logDir.appendingPathComponent("server.log")
         FileManager.default.createFile(atPath: logURL.path, contents: nil)

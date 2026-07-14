@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # build-mac-native.sh — Construit l'app macOS native (Swift tray + Node.js bundlé)
 # Usage : ./scripts/build-mac-native.sh [arm64|x64]
-# Sortie : dist-native/RadioStation-CD-Ripper.dmg  (~150 Mo vs ~500 Mo avec Electron)
+# Sortie : dist-native/RadioStation-Import-Studio.dmg  (~150 Mo vs ~500 Mo avec Electron)
 set -euo pipefail
 
 ARCH="${1:-arm64}"
@@ -9,7 +9,7 @@ NODE_ARCH=$([ "$ARCH" = "arm64" ] && echo "arm64" || echo "x64")
 SWIFT_TARGET=$([ "$ARCH" = "arm64" ] && echo "arm64-apple-macos12.0" || echo "x86_64-apple-macos12.0")
 
 NODE_VERSION="22.11.0"
-APP_NAME="RadioStation CD Ripper"
+APP_NAME="RadioStation Import Studio"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$SCRIPT_DIR/.."
@@ -29,7 +29,7 @@ swiftc \
   -O \
   -target "$SWIFT_TARGET" \
   "$ROOT_DIR/swift-tray/App.swift" \
-  -o "$APP_BUNDLE/Contents/MacOS/RadioStationCDRipper" \
+  -o "$APP_BUNDLE/Contents/MacOS/RadioStationImportStudio" \
   -framework Cocoa \
   -framework WebKit
 
@@ -56,15 +56,15 @@ cat > "$APP_BUNDLE/Contents/Info.plist" << PLIST
 <plist version="1.0">
 <dict>
     <key>CFBundleIdentifier</key>
-    <string>fr.radiostation.cd-ripper</string>
+    <string>fr.radiostation.import-studio</string>
     <key>CFBundleName</key>
-    <string>RadioStation CD Ripper</string>
+    <string>RadioStation Import Studio</string>
     <key>CFBundleVersion</key>
     <string>$APP_VERSION</string>
     <key>CFBundleShortVersionString</key>
     <string>$APP_VERSION</string>
     <key>CFBundleExecutable</key>
-    <string>RadioStationCDRipper</string>
+    <string>RadioStationImportStudio</string>
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
     <key>LSUIElement</key>
@@ -79,10 +79,10 @@ cat > "$APP_BUNDLE/Contents/Info.plist" << PLIST
     <array>
         <dict>
             <key>CFBundleURLName</key>
-            <string>fr.radiostation.cd-ripper.pairing</string>
+            <string>fr.radiostation.import-studio.pairing</string>
             <key>CFBundleURLSchemes</key>
             <array>
-                <string>radiostation-cdripper</string>
+                <string>radiostation-importstudio</string>
             </array>
         </dict>
     </array>
@@ -204,7 +204,7 @@ fi
 # hdiutil/SetFile, sans jamais passer par une automatisation Finder — cf. lecture de son code
 # source (aucune référence à Finder/osascript, contrairement à des outils comme create-dmg).
 echo "→ Création du DMG..."
-DMG_PATH="$DIST_DIR/RadioStation-CD-Ripper.dmg"
+DMG_PATH="$DIST_DIR/RadioStation-Import-Studio.dmg"
 # venv dédié plutôt que --user : évite toute question de politique "externally-managed-
 # environment" (PEP 668) du Python système du runner, sans dépendre d'un flag pip particulier.
 DMGBUILD_VENV="$DIST_DIR/.dmgbuild-venv"

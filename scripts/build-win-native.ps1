@@ -1,5 +1,5 @@
 # build-win-native.ps1 — Build Windows natif (C# NotifyIcon + Node.js bundlé)
-# Sortie : dist-native\RadioStation-CD-Ripper-Setup.exe (~150 Mo vs ~300 Mo Electron)
+# Sortie : dist-native\RadioStation-Import-Studio-Setup.exe (~150 Mo vs ~300 Mo Electron)
 # Usage  : .\scripts\build-win-native.ps1
 param()
 $ErrorActionPreference = "Stop"
@@ -19,7 +19,7 @@ New-Item -ItemType Directory -Path $DistDir -ErrorAction SilentlyContinue | Out-
 
 # ── 1. Compilation C# ─────────────────────────────────────────────────────────
 Write-Host "→ Compilation C# .NET 8..."
-$CsprojPath = Join-Path $RootDir "csharp-tray\RadioStationCDRipper.csproj"
+$CsprojPath = Join-Path $RootDir "csharp-tray\RadioStationImportStudio.csproj"
 dotnet publish $CsprojPath `
     -c Release `
     -r win-x64 `
@@ -94,7 +94,7 @@ Push-Location $WinDir
 Pop-Location
 Remove-Item $NsiCopy -ErrorAction SilentlyContinue
 
-$Output = Join-Path $DistDir "RadioStation-CD-Ripper-Setup.exe"
+$Output = Join-Path $DistDir "RadioStation-Import-Studio-Setup.exe"
 Write-Host ""
 Write-Host "✓ Build terminé : $Output"
 (Get-Item $Output).Length / 1MB | ForEach-Object { Write-Host ("Taille : {0:F1} Mo" -f $_) }
