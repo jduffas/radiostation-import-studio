@@ -159,6 +159,40 @@ _import_window = None  # référence module-level : évite le garbage-collect de
 _LOCAL_IMPORT_URL = f"http://127.0.0.1:{PORT}/"
 
 
+def _on_run_file_chooser(_webview, request, parent_window):
+    """WebKit2GTK ne montre AUCUN sélecteur de fichier natif pour <input type=file> sans ce
+    handler — bug réel trouvé (14 juillet 2026, retour utilisateur : le clic sur "Parcourir…"
+    n'ouvrait rien) : le signal `run-file-chooser` n'était jamais connecté, contrairement à
+    WKWebView (macOS)/WebView2 (Windows) qui ont chacun leur propre lacune ou prise en charge
+    native — voir commentaire équivalent chez _open_import_window. Corrigé et validé
+    réellement sur ce Pi (clic "Parcourir…" -> vrai GtkFileChooserNative affiché, sélection
+    d'un fichier réel -> transmise à la page web)."""
+    dialog = Gtk.FileChooserNative.new(
+        "Sélectionner un ou plusieurs fichiers audio",
+        parent_window,
+        Gtk.FileChooserAction.OPEN,
+        "Ouvrir",
+        "Annuler",
+    )
+    dialog.set_select_multiple(request.get_select_multiple())
+    try:
+        mime_filter = request.get_mime_types_filter()
+        if mime_filter:
+            dialog.add_filter(mime_filter)
+    except Exception:
+        pass
+    response = dialog.run()
+    if response == Gtk.ResponseType.ACCEPT:
+        # webkit_file_chooser_request_select_files attend des CHEMINS locaux, pas des URIs
+        # file:// (piège réel rencontré en écrivant ce handler — get_uris() aurait semblé
+        # fonctionner en apparence mais WebKit2 n'aurait jamais reconnu les fichiers).
+        request.select_files(dialog.get_filenames())
+    else:
+        request.cancel()
+    dialog.destroy()
+    return True
+
+
 def _open_import_window(icon, item):
     global _import_window
     if _import_window is not None:
@@ -170,6 +204,7 @@ def _open_import_window(icon, item):
 
     webview = WebKit2.WebView()
     webview.load_uri(_LOCAL_IMPORT_URL)
+    webview.connect("run-file-chooser", lambda wv, req: _on_run_file_chooser(wv, req, window))
     window.add(webview)
 
     def _on_destroy(_widget):

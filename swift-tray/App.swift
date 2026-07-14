@@ -16,7 +16,7 @@ app.run()
 // Delegate principal
 // ─────────────────────────────────────────────────────────────────────────────
 
-class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
+class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegate {
 
     private var statusItem: NSStatusItem!
     private var nodeProcess: Process?
@@ -310,6 +310,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.center()
         window.isReleasedWhenClosed = false
         window.delegate = self
+        webView.uiDelegate = self
 
         webView.load(URLRequest(url: Self.localImportURL))
 
@@ -323,6 +324,31 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard (notification.object as? NSWindow) === importWindow else { return }
         importWindow = nil
         importWebView = nil
+    }
+
+    // Sans WKUIDelegate.runOpenPanelWith, WKWebView n'affiche AUCUN sélecteur de fichier
+    // natif pour <input type=file> — bug réel trouvé (14 juillet 2026, retour utilisateur :
+    // le clic sur "Parcourir…" n'ouvrait rien) ; même famille de bug que WebKit2GTK côté
+    // Linux (voir _on_run_file_chooser dans python-tray/main.py), racine différente (delegate
+    // jamais assigné ici, signal jamais connecté là-bas). ⚠️ Non compilé/testé ici (pas de
+    // toolchain Xcode), même réserve que le reste de ce fichier.
+    func webView(
+        _ webView: WKWebView,
+        runOpenPanelWith parameters: WKOpenPanelParameters,
+        initiatedByFrame frame: WKFrameInfo,
+        completionHandler: @escaping ([URL]?) -> Void
+    ) {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = parameters.allowsMultipleSelection
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.begin { response in
+            if response == .OK {
+                completionHandler(panel.urls)
+            } else {
+                completionHandler(nil)
+            }
+        }
     }
 
     @objc private func toggleLoginItem(_ sender: NSMenuItem) {
