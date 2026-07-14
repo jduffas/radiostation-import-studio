@@ -91,7 +91,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(
-            title: "Importer un CD…",
+            title: "Importer…",
             action: #selector(openImportWindow),
             keyEquivalent: ""
         ))
@@ -305,7 +305,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             styleMask: [.titled, .closable, .resizable, .miniaturizable],
             backing: .buffered, defer: false
         )
-        window.title = "RadioStation — Import CD"
+        window.title = "RadioStation — Import"
         window.contentView = webView
         window.center()
         window.isReleasedWhenClosed = false

@@ -165,7 +165,7 @@ def _open_import_window(icon, item):
         _import_window.present()
         return
 
-    window = Gtk.Window(title="RadioStation — Import CD")
+    window = Gtk.Window(title="RadioStation — Import")
     window.set_default_size(1100, 800)
 
     webview = WebKit2.WebView()
@@ -430,7 +430,7 @@ def _build_menu():
         pystray.MenuItem(f"Serveur actif — port {PORT}",      None, enabled=False),
         pystray.MenuItem(f"Version {_fetch_app_version()}",   None, enabled=False),
         pystray.Menu.SEPARATOR,
-        pystray.MenuItem("Importer un CD…", _open_import_window),
+        pystray.MenuItem("Importer…", _open_import_window),
         pystray.MenuItem("Ouvrir RadioStation dans le navigateur", _open_browser),
         pystray.Menu.SEPARATOR,
         pystray.MenuItem("Vérifier la mise à jour", _check_for_update),

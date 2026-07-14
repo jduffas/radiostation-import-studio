@@ -123,7 +123,7 @@ class TrayApp : ApplicationContext
         menu.Items.Add(new ToolStripMenuItem($"Version {FetchAppVersion()}") { Enabled = false });
         menu.Items.Add(new ToolStripSeparator());
 
-        var importItem = new ToolStripMenuItem("Importer un CD…");
+        var importItem = new ToolStripMenuItem("Importer…");
         importItem.Click += (_, _) => OpenImportWindow();
         menu.Items.Add(importItem);
 
@@ -555,7 +555,7 @@ class ImportWindow : Form
 {
     public ImportWindow(string url)
     {
-        Text = "RadioStation — Import CD";
+        Text = "RadioStation — Import";
         Width = 1100;
         Height = 800;
         StartPosition = FormStartPosition.CenterScreen;

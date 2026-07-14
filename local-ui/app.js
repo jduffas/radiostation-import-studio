@@ -12,6 +12,17 @@ import { keyFromChroma } from './vendor/key-detect.js'
 const $app = document.getElementById('app')
 const $pairingIndicator = document.getElementById('pairing-indicator')
 const $vocalToggle = document.getElementById('vocal-toggle')
+const $pageTitle = document.getElementById('page-title')
+
+// Titre/en-tête dynamiques selon le mode choisi — l'app n'est plus limitée au CD depuis
+// Phase 4 (import de fichiers locaux), le libellé générique par défaut reflète maintenant
+// les deux (cf. aussi le renommage des items de menu tray "Importer un CD…" -> "Importer…").
+function updatePageTitle() {
+  const label = appMode === 'cd' ? 'Import CD' : appMode === 'files' ? 'Import fichiers' : 'Import'
+  const icon = appMode === 'cd' ? '📀' : appMode === 'files' ? '📁' : '📥'
+  document.title = `RadioStation — ${label}`
+  if ($pageTitle) $pageTitle.textContent = `${icon} ${label}`
+}
 
 let settings = {}
 let currentRipState = null
@@ -94,6 +105,7 @@ async function init() {
     stopPolling()
     localView = 'not-paired'
     appMode = null
+    updatePageTitle()
     render()
     return
   }
@@ -101,11 +113,13 @@ async function init() {
   // choisi (cf. enterCdMode()), pour ne pas faire tourner /status en fond inutilement
   // pendant un import de fichiers locaux.
   appMode = null
+  updatePageTitle()
   render()
 }
 
 async function enterCdMode() {
   appMode = 'cd'
+  updatePageTitle()
   localView = 'boot'
   await tick()
   resumePolling()
@@ -113,6 +127,7 @@ async function enterCdMode() {
 
 function enterFilesMode() {
   appMode = 'files'
+  updatePageTitle()
   filesStep = 'select'
   filesItems = []
   filesEditingIndex = 0
@@ -124,6 +139,7 @@ function backToModeSelector() {
   stopPolling()
   if (wavesurfer) { wavesurfer.destroy(); wavesurfer = null }
   appMode = null
+  updatePageTitle()
   render()
 }
 
