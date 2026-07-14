@@ -275,3 +275,27 @@ code {
   border-radius: 4px;
   font-size: 0.85em;
 }
+
+.mode-select {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.mode-btn {
+  flex: 1;
+  min-width: 220px;
+  padding: 20px;
+  font-size: 1.05rem;
+}
+
+#files-input {
+  color: var(--text);
+  margin-bottom: 12px;
+}
+
+#files-upload-status {
+  color: var(--text-dim);
+  font-size: 0.9rem;
+  margin-top: 8px;
+}

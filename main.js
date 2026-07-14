@@ -60,7 +60,16 @@ try {
 
 try {
   const raw = require('ffprobe-static').path;
-  FFPROBE = fixAsarPath(raw) || 'ffprobe';
+  const resolved = fixAsarPath(raw);
+  // Bug réel trouvé (Phase 4, testé sur Pi arm64) : `ffprobe-static` renvoie un chemin
+  // `path` calculé depuis platform/arch SANS vérifier que le binaire existe réellement —
+  // le paquet ne fournit aucun binaire `linux/arm64` (contrairement à `ffmpeg-static`), le
+  // chemin retourné pointe donc vers un fichier absent. Le `catch` ci-dessus ne l'attrape
+  // jamais (require() ne lève pas), donc AUCUN fallback système ne se déclenchait en
+  // pratique malgré le commentaire historique du plan — toute fonction utilisant FFPROBE
+  // échouait silencieusement (ENOENT capté par les `.on('error', () => resolve(null))`
+  // disséminés). Fix : vérifier l'existence avant d'adopter le chemin bundlé.
+  FFPROBE = (resolved && fs.existsSync(resolved)) ? resolved : 'ffprobe';
 } catch { /* utilise ffprobe système */ }
 
 // ============================================================
@@ -938,11 +947,27 @@ async function getTocWithMb() {
 // positions absolues dans le fichier rippé ORIGINAL (pas relatives à un appel /trim précédent).
 function trimWavFile(filePath, startMs, endMs) {
   return new Promise((resolve, reject) => {
-    const tmpOut = `${filePath}.trim-${Date.now()}.tmp`;
+    // Le fichier temporaire garde l'extension d'origine (pas de suffixe .tmp) : ffmpeg
+    // détermine le muxer de sortie depuis l'extension du chemin — un ".tmp" fait échouer
+    // "Unable to find a suitable output format" quel que soit le format source (bug réel
+    // trouvé et corrigé lors de la généralisation Phase 4 aux fichiers locaux).
+    const ext = path.extname(filePath); // peut être '' (fichier sans extension)
+    const base = ext ? filePath.slice(0, -ext.length) : filePath;
+    const tmpOut = `${base}.trim-${Date.now()}${ext}`;
+    // start_ms/end_ms sont des positions ABSOLUES dans le fichier original (doc ci-dessus,
+    // et confirmé par la façon dont local-ui/app.js calcule trimStart/trimEnd depuis la
+    // waveform complète). Bug réel trouvé et corrigé (Phase 4) : `-ss` posé en option
+    // D'ENTRÉE (avant -i) réinitialise la base de temps en sortie — un `-to` posé ensuite
+    // en option de sortie est alors mesuré depuis ce nouveau zéro (le point de seek), pas
+    // depuis le début du fichier original, ce qui coupait bien plus tard que demandé
+    // (vérifié réellement : `-ss 1.5 -i in -to 6.5` produit 6.5s de sortie, pas 5.0s).
+    // Fix : `-t` (durée depuis le seek) au lieu de `-to` (position absolue erronée ici).
     const args = ['-y'];
     if (startMs > 0) args.push('-ss', (startMs / 1000).toFixed(3));
     args.push('-i', filePath);
-    if (endMs != null && endMs > startMs) args.push('-to', (endMs / 1000).toFixed(3));
+    if (endMs != null && endMs > startMs) {
+      args.push('-t', ((endMs - startMs) / 1000).toFixed(3));
+    }
     args.push(tmpOut);
 
     const proc = spawn(FFMPEG, args);
@@ -982,6 +1007,200 @@ function probeLocalDurationSeconds(filePath) {
     proc.on('close', () => {
       const sec = parseFloat(out.trim());
       resolve(Number.isFinite(sec) ? sec : null);
+    });
+  });
+}
+
+// ============================================================
+// Import de fichiers locaux hors CD (Phase 4) — conversion, coupe, détection de cue
+// points, analyse loudness/energy/start-end type. BPM et tonalité restent calculés
+// côté webview (aubiojs, local-ui/app.js) : aucun round-trip HTTP pour ces deux-là.
+// ============================================================
+
+const NULL_OUTPUT = PLATFORM === 'win32' ? 'NUL' : '/dev/null';
+
+// file_id -> { dir, filePath, ext, originalName, convertedPath }
+const _localFiles = new Map();
+
+function readRawBody(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    req.on('data', c => chunks.push(c));
+    req.on('end', () => resolve(Buffer.concat(chunks)));
+    req.on('error', reject);
+  });
+}
+
+// Parseur multipart/form-data minimal (pas de dépendance ajoutée) — suffisant pour un
+// upload venant du `fetch(FormData)` de local-ui (boundary aléatoire du navigateur, jamais
+// présent dans les octets audio eux-mêmes).
+function parseMultipart(buffer, contentType) {
+  const m = /boundary=(?:"([^"]+)"|([^;]+))/i.exec(contentType || '');
+  const boundary = m ? (m[1] || m[2]).trim() : null;
+  if (!boundary) return [];
+  const boundaryBuf = Buffer.from(`--${boundary}`);
+  const parts = [];
+  let start = buffer.indexOf(boundaryBuf);
+  while (start !== -1) {
+    const next = buffer.indexOf(boundaryBuf, start + boundaryBuf.length);
+    if (next === -1) break;
+    let chunk = buffer.slice(start + boundaryBuf.length, next);
+    if (chunk.slice(-2).toString('latin1') === '\r\n') chunk = chunk.slice(0, -2);
+    const headerEnd = chunk.indexOf('\r\n\r\n');
+    if (headerEnd !== -1) {
+      const headerStr = chunk.slice(0, headerEnd).toString('utf8');
+      const body = chunk.slice(headerEnd + 4);
+      const nameMatch = /name="([^"]*)"/.exec(headerStr);
+      const filenameMatch = /filename="([^"]*)"/.exec(headerStr);
+      parts.push({ name: nameMatch ? nameMatch[1] : null, filename: filenameMatch ? filenameMatch[1] : null, data: body });
+    }
+    start = next;
+  }
+  return parts;
+}
+
+function runFfmpeg(args) {
+  return new Promise((resolve, reject) => {
+    const proc = spawn(FFMPEG, args);
+    let stderr = '';
+    proc.stderr.on('data', d => { stderr += d.toString(); });
+    proc.on('error', reject);
+    proc.on('close', (code) => {
+      if (code !== 0) reject(new Error(`ffmpeg exit ${code}: ${stderr.slice(-300)}`));
+      else resolve();
+    });
+  });
+}
+
+// Port de app/routers/importer.py::parse_filename (backend) — mêmes heuristiques
+// "Artiste - Titre" / "Artiste_Titre".
+function parseFilenameTitleArtist(filename) {
+  const name = filename.replace(/\.[^/.]+$/, '');
+  if (name.includes(' - ')) {
+    const idx = name.indexOf(' - ');
+    return { artist: name.slice(0, idx).trim(), title: name.slice(idx + 3).trim() };
+  }
+  if (name.includes('_') && !name.includes(' ')) {
+    const idx = name.indexOf('_');
+    return { artist: name.slice(0, idx).trim(), title: name.slice(idx + 1).trim() };
+  }
+  return { title: name.trim(), artist: '' };
+}
+
+// Port de audio_analysis.py::_get_volume_stats (ffmpeg volumedetect sur un segment).
+function getVolumeStats(filePath, { startOffset, duration } = {}) {
+  return new Promise((resolve) => {
+    const args = ['-y'];
+    if (startOffset != null && startOffset < 0) args.push('-sseof', String(startOffset), '-i', filePath);
+    else if (startOffset != null && startOffset > 0) args.push('-ss', String(startOffset), '-i', filePath);
+    else args.push('-i', filePath);
+    if (duration != null) args.push('-t', String(duration));
+    args.push('-af', 'volumedetect', '-f', 'null', NULL_OUTPUT);
+
+    const proc = spawn(FFMPEG, args);
+    let stderr = '';
+    proc.stderr.on('data', d => { stderr += d.toString(); });
+    proc.on('error', () => resolve(null));
+    proc.on('close', () => {
+      const meanM = stderr.match(/mean_volume:\s*([-\d.]+)\s*dB/);
+      const maxM = stderr.match(/max_volume:\s*([-\d.]+)\s*dB/);
+      if (!meanM) return resolve(null);
+      resolve({ mean: parseFloat(meanM[1]), max: maxM ? parseFloat(maxM[1]) : null });
+    });
+  });
+}
+
+// Port de audio_analysis.py::_detect_loudness_lufs (ffmpeg ebur128).
+function detectLoudnessLufs(filePath) {
+  return new Promise((resolve) => {
+    const proc = spawn(FFMPEG, ['-i', filePath, '-filter_complex', 'ebur128=peak=true', '-f', 'null', NULL_OUTPUT]);
+    let stderr = '';
+    proc.stderr.on('data', d => { stderr += d.toString(); });
+    proc.on('error', () => resolve(null));
+    proc.on('close', () => {
+      // Port fidèle de audio_analysis.py::_detect_loudness_lufs : itère toutes les lignes
+      // "I: … LUFS" (mesures par seconde ET résumé final) et retient la PREMIÈRE dans les
+      // bornes [-60, 0] — mêmes premières lignes hors-bornes (ex. -70.0 LUFS, mesure à
+      // faible confiance en tout début de flux) que côté backend, donc même comportement.
+      const re = /\bI:\s*([-\d.]+)\s*LUFS/g;
+      let m;
+      while ((m = re.exec(stderr)) !== null) {
+        const lufs = parseFloat(m[1]);
+        if (lufs >= -60 && lufs <= 0) return resolve(Math.round(lufs * 10) / 10);
+      }
+      resolve(null);
+    });
+  });
+}
+
+// Port de audio_analysis.py::_detect_energy (calibrage RMS moyen → échelle 1-5).
+function detectEnergyFromMean(meanDb) {
+  if (meanDb == null) return null;
+  if (meanDb > -8) return 5;
+  if (meanDb > -14) return 4;
+  if (meanDb > -20) return 3;
+  if (meanDb > -26) return 2;
+  return 1;
+}
+
+// Port de audio_analysis.py::_detect_end_type.
+async function detectEndType(filePath) {
+  const statsGlobal = await getVolumeStats(filePath);
+  if (!statsGlobal) return null;
+  const [last5, last1] = await Promise.all([
+    getVolumeStats(filePath, { startOffset: -5.0 }),
+    getVolumeStats(filePath, { startOffset: -1.0 }),
+  ]);
+  if (!last5 || !last1) return 'sustain';
+  const drop5 = statsGlobal.mean - last5.mean;
+  const drop1 = statsGlobal.mean - last1.mean;
+  if (drop1 > 25) return drop5 > 8 ? 'fade' : 'cold';
+  if (drop1 > 10) return 'fade';
+  return 'sustain';
+}
+
+// Port de audio_analysis.py::_detect_start_type.
+async function detectStartType(filePath, cueInSeconds = 0) {
+  const statsGlobal = await getVolumeStats(filePath);
+  if (!statsGlobal) return null;
+  const startOffset = cueInSeconds > 0 ? cueInSeconds : undefined;
+  const [first2, first5] = await Promise.all([
+    getVolumeStats(filePath, { startOffset, duration: 2.0 }),
+    getVolumeStats(filePath, { startOffset, duration: 5.0 }),
+  ]);
+  if (!first2 || !first5) return 'ambient';
+  const gap = statsGlobal.mean - first2.mean;
+  if (gap < 8) return 'hit';
+  if (first5.mean - first2.mean > 4) return 'build';
+  return 'ambient';
+}
+
+// Port de importer.py::detect_intro_outro (ffmpeg silencedetect) — utilisé par le bouton
+// "Détecter automatiquement" des cue points, uniquement côté app locale (jamais exposé dans
+// CuePointsEditor.vue web, décision actée Phase 4).
+function detectSilenceCue(filePath) {
+  return new Promise((resolve) => {
+    const proc = spawn(FFMPEG, ['-i', filePath, '-af', 'silencedetect=noise=-50dB:d=0.5', '-f', 'null', NULL_OUTPUT]);
+    let stderr = '';
+    proc.stderr.on('data', d => { stderr += d.toString(); });
+    proc.on('error', () => resolve({ intro_seconds: 0, outro_seconds: 0 }));
+    proc.on('close', () => {
+      let intro = 0, outro = 0, duration = 0, introSet = false;
+      for (const line of stderr.split('\n')) {
+        if (line.includes('silence_end') && !introSet) {
+          const m = line.match(/silence_end:\s*([-\d.]+)/);
+          if (m) { intro = parseFloat(m[1]); introSet = true; }
+        }
+        if (line.includes('Duration')) {
+          const m = line.match(/Duration:\s*(\d+):(\d+):([\d.]+)/);
+          if (m) duration = parseFloat(m[1]) * 3600 + parseFloat(m[2]) * 60 + parseFloat(m[3]);
+        }
+        if (line.includes('silence_start')) {
+          const m = line.match(/silence_start:\s*([-\d.]+)/);
+          if (m && duration > 0) outro = duration - parseFloat(m[1]);
+        }
+      }
+      resolve({ intro_seconds: Math.round(intro * 10) / 10, outro_seconds: Math.round(outro * 10) / 10 });
     });
   });
 }
@@ -1305,6 +1524,206 @@ const server = http.createServer(async (req, res) => {
     }
     finishRip().catch(e => console.error('[rip/confirm]', e));
     jsonResp(res, 200, { status: 'confirmed' });
+    return;
+  }
+
+  // ══ Import de fichiers locaux hors CD (Phase 4) ═══════════════════════════════
+  // Pas de machine à états serveur ici (contrairement au rip CD, pas de lecture disque
+  // longue) : chaque appel ffmpeg est attendu et répond directement — la webview pilote
+  // la séquence (upload → convert? → trim? → detect-cue?/analyze-loudness? → /import).
+
+  if (req.method === 'POST' && pathname === '/files/upload') {
+    try {
+      const raw = await readRawBody(req);
+      const parts = parseMultipart(raw, req.headers['content-type']);
+      const filePart = parts.find(p => p.name === 'file' && p.filename);
+      if (!filePart) return jsonResp(res, 400, { error: 'Aucun fichier reçu (champ "file" attendu)' });
+      const ext = path.extname(filePart.filename) || '.dat';
+      const id = crypto.randomBytes(8).toString('hex');
+      const dir = path.join(TMP_DIR, 'files', id);
+      fs.mkdirSync(dir, { recursive: true });
+      const filePath = path.join(dir, `original${ext}`);
+      fs.writeFileSync(filePath, filePart.data);
+      const durationSeconds = await probeLocalDurationSeconds(filePath);
+      const guessed = parseFilenameTitleArtist(filePart.filename);
+      _localFiles.set(id, { dir, filePath, ext, originalName: filePart.filename, convertedPath: null });
+      return jsonResp(res, 200, {
+        file_id: id,
+        name: filePart.filename,
+        duration_seconds: durationSeconds,
+        title: guessed.title,
+        artist: guessed.artist,
+      });
+    } catch (e) {
+      return jsonResp(res, 500, { error: e.message });
+    }
+  }
+
+  if (req.method === 'POST' && pathname === '/files/convert') {
+    let body = '';
+    req.on('data', c => { body += c; });
+    req.on('end', async () => {
+      let payload = {};
+      try { payload = JSON.parse(body); } catch { /* ignore */ }
+      const entry = _localFiles.get(payload.file_id);
+      if (!entry) return jsonResp(res, 404, { error: 'Fichier inconnu' });
+      const format = payload.format || 'original';
+      if (!['original', 'flac', 'aac'].includes(format)) {
+        return jsonResp(res, 400, { error: 'Format invalide. Valeurs: original, flac, aac' });
+      }
+      if (format === 'original') {
+        entry.convertedPath = null;
+        return jsonResp(res, 200, { status: 'done', file_id: payload.file_id, format });
+      }
+      const outExt = format === 'flac' ? '.flac' : '.m4a';
+      const outPath = path.join(entry.dir, `converted${outExt}`);
+      const args = format === 'flac'
+        ? ['-y', '-i', entry.filePath, '-c:a', 'flac', outPath]
+        : ['-y', '-i', entry.filePath, '-c:a', 'aac', '-b:a', '256k', outPath];
+      try {
+        await runFfmpeg(args);
+        entry.convertedPath = outPath;
+        jsonResp(res, 200, { status: 'done', file_id: payload.file_id, format });
+      } catch (e) {
+        jsonResp(res, 500, { error: e.message });
+      }
+    });
+    return;
+  }
+
+  if (req.method === 'POST' && pathname === '/files/trim') {
+    let body = '';
+    req.on('data', c => { body += c; });
+    req.on('end', async () => {
+      let payload = {};
+      try { payload = JSON.parse(body); } catch { /* ignore */ }
+      const entry = _localFiles.get(payload.file_id);
+      if (!entry) return jsonResp(res, 404, { error: 'Fichier inconnu' });
+      const startMs = Number(payload.start_ms) || 0;
+      const endMs = payload.end_ms != null ? Number(payload.end_ms) : null;
+      const targetPath = entry.convertedPath || entry.filePath;
+      try {
+        await trimWavFile(targetPath, startMs, endMs);
+        const durationSeconds = await probeLocalDurationSeconds(targetPath);
+        jsonResp(res, 200, { status: 'trimmed', file_id: payload.file_id, duration_seconds: durationSeconds });
+      } catch (e) {
+        jsonResp(res, 500, { error: e.message });
+      }
+    });
+    return;
+  }
+
+  if (req.method === 'POST' && pathname === '/files/detect-cue') {
+    let body = '';
+    req.on('data', c => { body += c; });
+    req.on('end', async () => {
+      let payload = {};
+      try { payload = JSON.parse(body); } catch { /* ignore */ }
+      const entry = _localFiles.get(payload.file_id);
+      if (!entry) return jsonResp(res, 404, { error: 'Fichier inconnu' });
+      const targetPath = entry.convertedPath || entry.filePath;
+      const cue = await detectSilenceCue(targetPath);
+      jsonResp(res, 200, { file_id: payload.file_id, ...cue });
+    });
+    return;
+  }
+
+  if (req.method === 'POST' && pathname === '/files/analyze-loudness') {
+    let body = '';
+    req.on('data', c => { body += c; });
+    req.on('end', async () => {
+      let payload = {};
+      try { payload = JSON.parse(body); } catch { /* ignore */ }
+      const entry = _localFiles.get(payload.file_id);
+      if (!entry) return jsonResp(res, 404, { error: 'Fichier inconnu' });
+      const targetPath = entry.convertedPath || entry.filePath;
+      const cueInSeconds = Number(payload.cue_in_seconds) || 0;
+      try {
+        const [loudnessLufs, statsGlobal, endType, startType] = await Promise.all([
+          detectLoudnessLufs(targetPath),
+          getVolumeStats(targetPath),
+          detectEndType(targetPath),
+          detectStartType(targetPath, cueInSeconds),
+        ]);
+        jsonResp(res, 200, {
+          file_id: payload.file_id,
+          loudness_lufs: loudnessLufs,
+          energy: detectEnergyFromMean(statsGlobal?.mean),
+          end_type: endType,
+          start_type: startType,
+        });
+      } catch (e) {
+        jsonResp(res, 500, { error: e.message });
+      }
+    });
+    return;
+  }
+
+  // Upload groupé vers le backend distant (originaux ou convertis/coupés) — même mécanisme
+  // que finishRip() côté CD (uploadToBackend), déclenché une fois que l'utilisateur a validé
+  // la coupe/cue de tous les fichiers sélectionnés. Les file_id retournés sont ensuite
+  // consommés un par un via /import (proxy déjà générique, inchangé par Phase 4).
+  if (req.method === 'POST' && pathname === '/files/finish') {
+    let body = '';
+    req.on('data', c => { body += c; });
+    req.on('end', async () => {
+      let payload = {};
+      try { payload = JSON.parse(body); } catch { /* ignore */ }
+      const items = Array.isArray(payload.items) ? payload.items : [];
+      if (!items.length) return jsonResp(res, 400, { error: 'Aucun fichier à envoyer' });
+
+      const stored = loadSettings();
+      const backendUrl = stored.server_url || process.env.RADIOSTATION_URL || 'http://localhost:8000';
+      const authToken = stored.device_token || '';
+
+      const files = [];
+      const metaArr = [];
+      for (const it of items) {
+        const entry = _localFiles.get(it.file_id);
+        if (!entry) continue;
+        const targetPath = entry.convertedPath || entry.filePath;
+        const ext = path.extname(targetPath);
+        const safeName = (it.title || entry.originalName || 'track').replace(/[/\\]/g, '_');
+        files.push({ name: `${safeName}${ext}`, filePath: targetPath });
+        metaArr.push({ title: it.title, artist: it.artist, album: it.album, year: it.year });
+      }
+      if (!files.length) return jsonResp(res, 400, { error: 'Fichiers introuvables (session expirée ?)' });
+
+      try {
+        const upResult = await uploadToBackend(backendUrl, authToken, files, metaArr);
+        jsonResp(res, 200, {
+          file_ids: (upResult.files || []).map(f => f.file_id).filter(Boolean),
+          files_metadata: (upResult.files || []).map(f => f.metadata || {}),
+        });
+      } catch (e) {
+        jsonResp(res, 502, { error: e.message });
+      } finally {
+        for (const it of items) {
+          const entry = _localFiles.get(it.file_id);
+          if (entry) {
+            try { fs.rmSync(entry.dir, { recursive: true, force: true }); } catch { /* ignore */ }
+            _localFiles.delete(it.file_id);
+          }
+        }
+      }
+    });
+    return;
+  }
+
+  if (req.method === 'GET' && pathname.startsWith('/files/preview/')) {
+    const id = pathname.slice('/files/preview/'.length);
+    const entry = _localFiles.get(id);
+    const targetPath = entry && (entry.convertedPath || entry.filePath);
+    if (!entry || !fs.existsSync(targetPath)) {
+      return jsonResp(res, 404, { error: 'Fichier indisponible' });
+    }
+    const stat = fs.statSync(targetPath);
+    const audioMime = {
+      '.wav': 'audio/wav', '.flac': 'audio/flac', '.m4a': 'audio/mp4',
+      '.aac': 'audio/aac', '.mp3': 'audio/mpeg', '.ogg': 'audio/ogg',
+    }[path.extname(targetPath).toLowerCase()] || 'application/octet-stream';
+    res.writeHead(200, { 'Content-Type': audioMime, 'Content-Length': stat.size, ...res.corsHeaders });
+    fs.createReadStream(targetPath).pipe(res);
     return;
   }
 

@@ -6,6 +6,8 @@
 // main.js vers le vrai backend avec le jeton d'appareil déjà appairé) touche le réseau.
 import WaveSurfer from './vendor/wavesurfer.esm.js'
 import RegionsPlugin from './vendor/regions.esm.js'
+import aubioFactory from './vendor/aubio.esm.js'
+import { keyFromChroma } from './vendor/key-detect.js'
 
 const $app = document.getElementById('app')
 const $pairingIndicator = document.getElementById('pairing-indicator')
@@ -15,6 +17,10 @@ let settings = {}
 let currentRipState = null
 let cdStatus = null
 let pollTimer = null
+
+// Mode choisi par l'utilisateur sur l'écran d'accueil — null tant qu'aucun choix n'a été
+// fait (aucun sondage CD démarré tant que le mode n'est pas 'cd', cf. enterCdMode()).
+let appMode = null // null | 'cd' | 'files'
 
 // État local (pas dans /rip/status) : sélection des pistes avant rip
 let localView = 'boot' // 'boot' | 'toc-loading' | 'toc-ready' | 'toc-error'
@@ -32,6 +38,16 @@ const localCuePoints = {}
 let sendResults = [] // [{status:'pending'|'sending'|'done'|'error', error, title, artist, album, year}]
 
 let wavesurfer = null // instance courante (une piste à la fois, détruite entre les pistes)
+
+// ---- État du flux "fichiers locaux" hors CD (Phase 4) ----
+// Entièrement piloté côté client : contrairement au rip CD (lecture disque potentiellement
+// longue, nécessite un sondage /rip/status en tâche de fond), chaque appel /files/* est
+// attendu et répond directement — pas de machine à états côté serveur à interroger.
+let filesStep = 'select' // 'select' | 'editing' | 'sending'
+let filesItems = [] // [{id, name, title, artist, album, year, durationSeconds, cueInSeconds, cueOutSeconds, bpm, key, loudnessLufs, energy, startType, endType, analyzing, sendStatus, sendError, backendFileId}]
+let filesEditingIndex = 0
+let filesFinishing = false
+let aubioModule = null // chargé paresseusement (une seule fois, coût wasm non négligeable)
 
 // ---- HTTP ----
 async function api(path, opts = {}) {
@@ -77,12 +93,38 @@ async function init() {
   if (!settings.server_url || !settings.device_token) {
     stopPolling()
     localView = 'not-paired'
+    appMode = null
     render()
     return
   }
+  // Écran de choix de mode d'abord — pas de sondage CD tant que l'utilisateur n'a pas
+  // choisi (cf. enterCdMode()), pour ne pas faire tourner /status en fond inutilement
+  // pendant un import de fichiers locaux.
+  appMode = null
+  render()
+}
+
+async function enterCdMode() {
+  appMode = 'cd'
   localView = 'boot'
   await tick()
   resumePolling()
+}
+
+function enterFilesMode() {
+  appMode = 'files'
+  filesStep = 'select'
+  filesItems = []
+  filesEditingIndex = 0
+  filesFinishing = false
+  render()
+}
+
+function backToModeSelector() {
+  stopPolling()
+  if (wavesurfer) { wavesurfer.destroy(); wavesurfer = null }
+  appMode = null
+  render()
 }
 
 function updatePairingIndicator() {
@@ -127,6 +169,9 @@ async function tick() {
 // ---- Rendu principal ----
 function render() {
   if (localView === 'not-paired') return renderNotPaired()
+  if (appMode === null) return renderModeSelector()
+  if (appMode === 'files') return renderFiles()
+
   if (!currentRipState) { $app.innerHTML = '<p class="loading">Connexion au serveur local…</p>'; return }
 
   const status = currentRipState.status
@@ -167,9 +212,27 @@ function renderIdle() {
         <p class="hint">${detected ? 'Prêt à lire la table des matières.' : 'Insérez un CD audio pour commencer.'}</p>
         <button class="btn" id="btn-toc" ${detected ? '' : 'disabled'}>Sélectionner les pistes…</button>
       </div>
+      <div class="actions">
+        <button class="btn-secondary" id="btn-back-mode">← Changer de mode</button>
+      </div>
     </div>`
   const btn = document.getElementById('btn-toc')
   if (btn) btn.onclick = openTrackSelection
+  document.getElementById('btn-back-mode').onclick = backToModeSelector
+}
+
+// ---- Écran de choix de mode (Phase 4) ----
+function renderModeSelector() {
+  $app.innerHTML = `
+    <div class="card">
+      <div class="card-header">Que souhaitez-vous importer ?</div>
+      <div class="card-body mode-select">
+        <button class="btn mode-btn" id="btn-mode-cd">💿 Importer un CD</button>
+        <button class="btn mode-btn" id="btn-mode-files">📁 Importer des fichiers locaux</button>
+      </div>
+    </div>`
+  document.getElementById('btn-mode-cd').onclick = enterCdMode
+  document.getElementById('btn-mode-files').onclick = enterFilesMode
 }
 
 // ---- Sélection des pistes (TOC) ----
@@ -349,7 +412,7 @@ function renderTrimming() {
       </div>
     </div>`
 
-  setupTrimWaveform(track.trackNumber)
+  setupTrimWaveform(`/rip-preview/${track.trackNumber}`)
 
   document.getElementById('btn-skip-track').onclick = () => advanceTrimming(null, null, 0, 0)
   document.getElementById('btn-confirm-track').onclick = onConfirmTrack
@@ -358,7 +421,11 @@ function renderTrimming() {
 
 let trimMarkers = null // { trimStart, trimEnd, cueInPos, cueOutPos, keepRegion, cueInRegion, cueOutRegion }
 
-function setupTrimWaveform(trackNumber) {
+// Généralisé (Phase 4) pour servir aussi bien la préecoute CD (/rip-preview/:n) que celle
+// des fichiers locaux (/files/preview/:id) — même waveform, mêmes régions, seule l'URL
+// change. `onReady` optionnel : callback additionnel une fois la waveform décodée (utilisé
+// par le flux fichiers locaux pour lancer l'analyse BPM/tonalité côté client, cf. analyzeBpmKey).
+function setupTrimWaveform(previewUrl, onReady) {
   if (wavesurfer) { wavesurfer.destroy(); wavesurfer = null }
   const regions = RegionsPlugin.create()
   wavesurfer = WaveSurfer.create({
@@ -371,12 +438,23 @@ function setupTrimWaveform(trackNumber) {
     barGap: 1,
     normalize: true,
     plugins: [regions],
-    url: `/rip-preview/${trackNumber}`,
+    url: previewUrl,
   })
 
   trimMarkers = {
     trimStart: 0, trimEnd: 0, cueInPos: 0, cueOutPos: 0,
     keepRegion: null, cueInRegion: null, cueOutRegion: null, updating: false,
+    // Bug réel trouvé et corrigé (Phase 4) : le bouton "Tout réinitialiser" appelait déjà
+    // trimMarkers?.resetToFull() sans que la méthode existe jamais — clic sans effet
+    // (silencieux, aucune région ne bougeait). Généralisé en même temps que cette fonction.
+    resetToFull() {
+      const dur = wavesurfer.getDuration()
+      this.trimStart = 0; this.trimEnd = dur; this.cueInPos = 0; this.cueOutPos = dur
+      this.keepRegion?.setOptions({ start: 0, end: dur })
+      this.cueInRegion?.setOptions({ start: 0 })
+      this.cueOutRegion?.setOptions({ start: dur })
+      updateSummary()
+    },
   }
 
   wavesurfer.on('ready', () => {
@@ -389,6 +467,7 @@ function setupTrimWaveform(trackNumber) {
     trimMarkers.cueInRegion = regions.addRegion({ id: 'cue-in', start: 0, color: 'rgba(33,150,243,0.9)', drag: true, resize: false, content: markerLabel('DÉBUT', '#2196f3') })
     trimMarkers.cueOutRegion = regions.addRegion({ id: 'cue-out', start: dur, color: 'rgba(244,67,54,0.9)', drag: true, resize: false, content: markerLabel('TRANSITION', '#f44336') })
     updateSummary()
+    onReady?.()
   })
 
   wavesurfer.on('timeupdate', (t) => {
@@ -621,6 +700,378 @@ function resetAfterDone() {
   trimIndex = 0
   Object.keys(localCuePoints).forEach(k => delete localCuePoints[k])
   init()
+}
+
+// ══ Flux "fichiers locaux" hors CD (Phase 4) ═══════════════════════════════════════
+// Réutilise les briques waveform/trim/cue déjà en place pour le CD (setupTrimWaveform,
+// trimMarkers, updateSummary, onRegionMoved — mêmes ids DOM sum-kept/sum-cuein/sum-cueout/
+// time-display, réutilisés tels quels par renderFilesTrimming ci-dessous) plutôt que de les
+// dupliquer, conformément au non-objectif du plan (pas de réimplémentation par flux).
+
+function renderFiles() {
+  if (filesStep === 'select') return renderFilesSelect()
+  if (filesStep === 'editing') return renderFilesTrimming()
+  if (filesStep === 'sending') return renderFilesSend()
+}
+
+function renderFilesSelect() {
+  $app.innerHTML = `
+    <div class="card">
+      <div class="card-header">Importer des fichiers locaux</div>
+      <div class="card-body">
+        <p class="hint">Sélectionnez un ou plusieurs fichiers audio (mp3, wav, flac, m4a…) —
+        conversion, coupe du silence, cue points et analyse (BPM/tonalité/loudness/energy)
+        se font ici, avant l'envoi vers RadioStation.</p>
+        <input type="file" id="files-input" accept="audio/*" multiple>
+        <div id="files-upload-status"></div>
+      </div>
+      <div class="actions">
+        <button class="btn-secondary" id="btn-back-mode">← Changer de mode</button>
+      </div>
+    </div>`
+  document.getElementById('btn-back-mode').onclick = backToModeSelector
+  document.getElementById('files-input').onchange = (e) => uploadSelectedFiles(e.target.files)
+}
+
+async function uploadSelectedFiles(fileList) {
+  const files = Array.from(fileList || [])
+  if (!files.length) return
+  const $status = document.getElementById('files-upload-status')
+  filesItems = []
+  for (let i = 0; i < files.length; i++) {
+    if ($status) $status.textContent = `Envoi ${i + 1}/${files.length}…`
+    const fd = new FormData()
+    fd.append('file', files[i], files[i].name)
+    try {
+      const up = await api('/files/upload', { method: 'POST', body: fd })
+      filesItems.push({
+        id: up.file_id,
+        name: up.name,
+        title: up.title || '',
+        artist: up.artist || '',
+        album: '',
+        year: '',
+        durationSeconds: up.duration_seconds,
+        cueInSeconds: 0,
+        cueOutSeconds: 0,
+        bpm: null,
+        key: null,
+        loudnessLufs: null,
+        energy: null,
+        startType: null,
+        endType: null,
+        analyzing: false,
+        sendStatus: 'pending',
+        sendError: null,
+        backendFileId: null,
+      })
+    } catch (e) {
+      alert(`Échec de l'envoi de ${files[i].name} : ` + e.message)
+    }
+  }
+  if (!filesItems.length) { render(); return }
+  filesStep = 'editing'
+  filesEditingIndex = 0
+  render()
+}
+
+function renderFilesTrimming() {
+  const item = filesItems[filesEditingIndex]
+  if (!item) { filesStep = 'select'; render(); return }
+
+  $app.innerHTML = `
+    <div class="card">
+      <div class="card-header">
+        Fichier ${filesEditingIndex + 1} / ${filesItems.length} — ${escapeHtml(item.title || item.name)}
+      </div>
+      <div class="waveform-container"><div id="waveform"></div></div>
+      <div class="controls-bar">
+        <div class="playback-group">
+          <button class="btn-ctrl" id="btn-playpause">►</button>
+          <button class="btn-ctrl" id="btn-stop">Stop</button>
+          <button class="btn-ctrl" id="btn-reset">Tout réinitialiser</button>
+          <button class="btn-ctrl" id="btn-auto-cue">🔍 Détecter automatiquement</button>
+        </div>
+        <div class="time-display" id="time-display">00:00.000 / 00:00.000</div>
+      </div>
+      <div class="summary-row">
+        <div class="summary-item"><span class="summary-dot dot-blue"></span> Zone conservée : <strong id="sum-kept">—</strong></div>
+        <div class="summary-item">
+          <span class="summary-dot dot-cyan"></span> Début (skip) : <strong id="sum-cuein">00:00.000</strong>
+          <button class="btn-preview" id="btn-preview-start">🔊 Écouter</button>
+        </div>
+        <div class="summary-item">
+          <span class="summary-dot dot-red"></span> Transition (avant fin) : <strong id="sum-cueout">00:00.000</strong>
+          <button class="btn-preview" id="btn-preview-end">🔊 Écouter</button>
+        </div>
+      </div>
+      <div class="summary-row">
+        <div class="summary-item">BPM : <strong id="sum-bpm">—</strong></div>
+        <div class="summary-item">Tonalité : <strong id="sum-key">—</strong></div>
+      </div>
+      <p class="hint" style="padding:12px 24px;">
+        <strong>Zone bleue</strong> : glissez les bords pour couper le silence/déchet — coupe
+        définitive, avant l'envoi. <strong>DÉBUT</strong> (cyan) / <strong>TRANSITION</strong>
+        (rouge) : cue points, ni l'un ni l'autre n'est obligatoire, affinables après import.
+        « Détecter automatiquement » propose des positions à partir des silences détectés.
+        BPM et tonalité sont calculés automatiquement sur la piste entière.
+      </p>
+      <div class="actions">
+        <button class="btn-secondary" id="btn-skip-file">Passer (garder tel quel)</button>
+        <button class="btn" id="btn-confirm-file">Valider et continuer</button>
+      </div>
+    </div>`
+
+  setupTrimWaveform(`/files/preview/${item.id}`, () => {
+    item.analyzing = true
+    updateFilesTrimmingBpmKey(item)
+    analyzeBpmKey(item)
+  })
+  updateFilesTrimmingBpmKey(item)
+
+  document.getElementById('btn-skip-file').onclick = () => advanceFilesTrimming(null, null, 0, 0)
+  document.getElementById('btn-confirm-file').onclick = onConfirmFilesTrack
+  document.getElementById('btn-reset').onclick = () => trimMarkers?.resetToFull()
+  document.getElementById('btn-auto-cue').onclick = () => autoDetectCue(item)
+}
+
+function updateFilesTrimmingBpmKey(item) {
+  const $bpm = document.getElementById('sum-bpm')
+  const $key = document.getElementById('sum-key')
+  if ($bpm) $bpm.textContent = item.analyzing ? '…' : (item.bpm != null ? item.bpm : '—')
+  if ($key) $key.textContent = item.analyzing ? '…' : (item.key || '—')
+}
+
+async function autoDetectCue(item) {
+  try {
+    const cue = await api('/files/detect-cue', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ file_id: item.id }),
+    })
+    if (!trimMarkers || !wavesurfer) return
+    const cueIn = Math.max(trimMarkers.trimStart, Math.min(cue.intro_seconds, trimMarkers.trimEnd - 0.1))
+    const cueOut = Math.min(trimMarkers.trimEnd, Math.max(trimMarkers.trimEnd - cue.outro_seconds, trimMarkers.trimStart + 0.1))
+    trimMarkers.cueInPos = cueIn
+    trimMarkers.cueOutPos = cueOut
+    trimMarkers.cueInRegion?.setOptions({ start: cueIn })
+    trimMarkers.cueOutRegion?.setOptions({ start: cueOut })
+    updateSummary()
+  } catch (e) {
+    alert('Détection automatique impossible : ' + e.message)
+  }
+}
+
+async function getAubio() {
+  if (!aubioModule) aubioModule = await aubioFactory()
+  return aubioModule
+}
+
+// BPM + tonalité calculés côté webview (aucun round-trip HTTP) sur le buffer déjà décodé
+// par WaveSurfer pour le rendu de la waveform — mêmes paramètres qu'audio_analysis.py côté
+// backend (aubio pitch -m yinfft -B 4096 -H 2048, plage 60-4000 Hz) pour rester comparable.
+async function analyzeBpmKey(item) {
+  if (!wavesurfer) return
+  try {
+    const decoded = wavesurfer.getDecodedData()
+    if (!decoded) return
+    const channelData = decoded.getChannelData(0)
+    const sampleRate = decoded.sampleRate
+    const { Tempo, Pitch } = await getAubio()
+
+    const tempoBufSize = 1024, tempoHop = 512
+    const tempo = new Tempo(tempoBufSize, tempoHop, sampleRate)
+    let bpm = null
+    for (let i = 0; i + tempoHop <= channelData.length; i += tempoHop) {
+      const beat = tempo.do(channelData.subarray(i, i + tempoHop))
+      if (beat) bpm = tempo.getBpm()
+    }
+    if (bpm != null && bpm >= 40 && bpm <= 250) item.bpm = Math.round(bpm * 10) / 10
+
+    const pitchBufSize = 4096, pitchHop = 2048
+    const pitch = new Pitch('yinfft', pitchBufSize, pitchHop, sampleRate)
+    const chroma = new Array(12).fill(0)
+    let count = 0
+    for (let i = 0; i + pitchHop <= channelData.length; i += pitchHop) {
+      const freq = pitch.do(channelData.subarray(i, i + pitchHop))
+      if (freq < 60 || freq > 4000) continue
+      const midi = 69 + 12 * Math.log2(freq / 440)
+      const pc = ((Math.round(midi) % 12) + 12) % 12
+      chroma[pc] += 1
+      count++
+    }
+    if (count >= 20) item.key = keyFromChroma(chroma)
+  } catch (e) {
+    console.warn('[analyzeBpmKey]', e.message)
+  } finally {
+    item.analyzing = false
+    updateFilesTrimmingBpmKey(item)
+  }
+}
+
+async function onConfirmFilesTrack() {
+  const hasTrim = trimMarkers.trimStart > 0.05 || trimMarkers.trimEnd < wavesurfer.getDuration() - 0.05
+  const startMs = Math.round(trimMarkers.trimStart * 1000)
+  const endMs = hasTrim ? Math.round(trimMarkers.trimEnd * 1000) : null
+  const cueInSeconds = Math.max(0, trimMarkers.cueInPos - trimMarkers.trimStart)
+  const cueOutSeconds = Math.max(0, trimMarkers.trimEnd - trimMarkers.cueOutPos)
+  await advanceFilesTrimming(startMs, endMs, cueInSeconds, cueOutSeconds)
+}
+
+async function advanceFilesTrimming(startMs, endMs, cueInSeconds, cueOutSeconds) {
+  const item = filesItems[filesEditingIndex]
+
+  if (endMs != null) {
+    try {
+      await api('/files/trim', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ file_id: item.id, start_ms: startMs, end_ms: endMs }),
+      })
+    } catch (e) {
+      alert('Impossible de couper le fichier : ' + e.message)
+    }
+  }
+  item.cueInSeconds = cueInSeconds
+  item.cueOutSeconds = cueOutSeconds
+
+  // Loudness/energy/start-end type ffmpeg côté serveur — après coupe éventuelle, pour que
+  // start_type reflète le vrai début audible (cue_in_seconds).
+  try {
+    const loud = await api('/files/analyze-loudness', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ file_id: item.id, cue_in_seconds: cueInSeconds }),
+    })
+    item.loudnessLufs = loud.loudness_lufs
+    item.energy = loud.energy
+    item.startType = loud.start_type
+    item.endType = loud.end_type
+  } catch (e) {
+    console.warn('[analyze-loudness]', e.message)
+  }
+
+  const isLast = filesEditingIndex >= filesItems.length - 1
+  if (isLast) {
+    if (wavesurfer) { wavesurfer.destroy(); wavesurfer = null }
+    await finishFilesUpload()
+    return
+  }
+  filesEditingIndex += 1
+  render()
+}
+
+// Upload groupé des fichiers (originaux ou convertis/coupés) vers le backend, comme
+// finishRip() pour le CD — mêmes ids de retour (fileIds/filesMetadata), consommés ensuite
+// un par un via /import (proxy déjà générique, inchangé).
+async function finishFilesUpload() {
+  filesStep = 'sending'
+  filesFinishing = true
+  render()
+  try {
+    const result = await api('/files/finish', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        items: filesItems.map(it => ({ file_id: it.id, title: it.title, artist: it.artist, album: it.album, year: it.year })),
+      }),
+    })
+    const fileIds = result.file_ids || []
+    const metas = result.files_metadata || []
+    filesItems.forEach((it, i) => {
+      it.backendFileId = fileIds[i] || null
+      it.sendStatus = it.backendFileId ? 'pending' : 'error'
+      it.sendError = it.backendFileId ? null : 'Échec de l\'envoi vers RadioStation'
+      if (!it.title && metas[i]?.title) it.title = metas[i].title
+      if (!it.artist && metas[i]?.artist) it.artist = metas[i].artist
+    })
+  } catch (e) {
+    filesItems.forEach(it => { it.sendStatus = 'error'; it.sendError = e.message })
+  }
+  filesFinishing = false
+  render()
+}
+
+function renderFilesSend() {
+  if (filesFinishing) {
+    $app.innerHTML = '<div class="card"><div class="card-body"><p class="loading">Envoi vers RadioStation…</p></div></div>'
+    return
+  }
+
+  const allDone = filesItems.every(it => it.sendStatus === 'done')
+  const rows = filesItems.map((it, i) => `
+    <div class="card">
+      <div class="card-header">${escapeHtml(it.title || it.name)}${it.sendStatus === 'done' ? ' ✅' : it.sendStatus === 'error' ? ' ⚠️' : ''}</div>
+      <div class="card-body">
+        ${it.sendStatus === 'error' ? `<div class="error-box">${escapeHtml(it.sendError)}</div>` : ''}
+        <div class="metadata-form">
+          <label>Titre <input type="text" data-idx="${i}" class="fmeta-title" value="${escapeHtml(it.title)}" ${it.sendStatus === 'done' ? 'disabled' : ''}></label>
+          <label>Artiste <input type="text" data-idx="${i}" class="fmeta-artist" value="${escapeHtml(it.artist)}" ${it.sendStatus === 'done' ? 'disabled' : ''}></label>
+          <label>Album <input type="text" data-idx="${i}" class="fmeta-album" value="${escapeHtml(it.album)}" ${it.sendStatus === 'done' ? 'disabled' : ''}></label>
+          <label>Année <input type="text" data-idx="${i}" class="fmeta-year" value="${escapeHtml(String(it.year || ''))}" ${it.sendStatus === 'done' ? 'disabled' : ''}></label>
+        </div>
+        <p class="hint">BPM : ${it.bpm ?? '—'} · Tonalité : ${it.key || '—'} · Loudness : ${it.loudnessLufs != null ? it.loudnessLufs + ' LUFS' : '—'}</p>
+        ${it.sendStatus === 'done' ? '<div class="success-box">Envoyé vers RadioStation.</div>' :
+          `<button class="btn btn-send-file" data-idx="${i}" ${(it.sendStatus === 'sending' || !it.backendFileId) ? 'disabled' : ''}>${it.sendStatus === 'sending' ? 'Envoi…' : 'Envoyer ce fichier'}</button>`}
+      </div>
+    </div>`).join('')
+
+  $app.innerHTML = `
+    ${rows}
+    ${allDone ? `
+      <div class="success-box">Tous les fichiers ont été envoyés vers RadioStation.</div>
+      <button class="btn" id="btn-new-files">Importer d'autres fichiers</button>
+    ` : `<button class="btn" id="btn-send-all-files">Tout envoyer</button>`}
+  `
+
+  document.querySelectorAll('.fmeta-title').forEach(el => el.oninput = () => { filesItems[+el.dataset.idx].title = el.value })
+  document.querySelectorAll('.fmeta-artist').forEach(el => el.oninput = () => { filesItems[+el.dataset.idx].artist = el.value })
+  document.querySelectorAll('.fmeta-album').forEach(el => el.oninput = () => { filesItems[+el.dataset.idx].album = el.value })
+  document.querySelectorAll('.fmeta-year').forEach(el => el.oninput = () => { filesItems[+el.dataset.idx].year = el.value })
+  document.querySelectorAll('.btn-send-file').forEach(el => { el.onclick = () => sendFileItem(+el.dataset.idx) })
+  const btnAll = document.getElementById('btn-send-all-files')
+  if (btnAll) btnAll.onclick = sendAllFileItems
+  const btnNew = document.getElementById('btn-new-files')
+  if (btnNew) btnNew.onclick = () => enterFilesMode()
+}
+
+async function sendFileItem(i) {
+  const it = filesItems[i]
+  if (!it.backendFileId) return
+  it.sendStatus = 'sending'
+  render()
+  try {
+    await api('/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        file_id: it.backendFileId,
+        title: it.title,
+        artist_name: it.artist || 'Unknown',
+        album: it.album || undefined,
+        year: it.year ? Number(it.year) : undefined,
+        cue_in_seconds: it.cueInSeconds,
+        cue_out_seconds: it.cueOutSeconds,
+        bpm: it.bpm ?? undefined,
+        key: it.key ?? undefined,
+        loudness_lufs: it.loudnessLufs ?? undefined,
+        energy: it.energy ?? undefined,
+        start_type: it.startType ?? undefined,
+        end_type: it.endType ?? undefined,
+      }),
+    })
+    it.sendStatus = 'done'
+  } catch (e) {
+    it.sendStatus = 'error'
+    it.sendError = e.message
+  }
+  render()
+}
+
+async function sendAllFileItems() {
+  for (let i = 0; i < filesItems.length; i++) {
+    if (filesItems[i].sendStatus !== 'done') await sendFileItem(i)
+  }
 }
 
 function escapeHtml(s) {
