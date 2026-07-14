@@ -165,10 +165,14 @@ main {
   background-color: #ffd600 !important;
   width: 2px !important;
 }
+/* top:0 (pas de valeur négative) : le conteneur interne de scroll de wavesurfer a
+   `overflow-y:hidden` (nécessaire pour le zoom horizontal, cf. waveZoom) — un triangle placé
+   au-dessus de la piste (top négatif) serait rogné et invisible. Ancré à l'intérieur, en
+   haut de la piste, pointe vers le bas sur le trait du curseur. */
 #waveform ::part(cursor)::after {
   content: "";
   position: absolute;
-  top: -9px;
+  top: 0;
   left: 50%;
   transform: translateX(-50%);
   width: 0;
@@ -206,6 +210,16 @@ main {
 }
 
 .playback-group { display: flex; gap: 8px; }
+
+.zoom-group { display: flex; align-items: center; gap: 6px; }
+
+.zoom-level {
+  font-family: 'Courier New', monospace;
+  font-size: 0.85rem;
+  color: var(--text-dim);
+  min-width: 2.4em;
+  text-align: center;
+}
 
 .btn-ctrl {
   background: #333;

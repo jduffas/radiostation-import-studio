@@ -420,6 +420,12 @@ function renderTrimming() {
           <button class="btn-ctrl" id="btn-stop">Stop</button>
           <button class="btn-ctrl" id="btn-reset">Tout réinitialiser</button>
         </div>
+        <div class="zoom-group">
+          <button class="btn-ctrl" id="btn-zoom-out" title="Zoom arrière">➖</button>
+          <span class="zoom-level" id="zoom-level">×1</span>
+          <button class="btn-ctrl" id="btn-zoom-in" title="Zoom avant (précision des cue points)">➕</button>
+          <button class="btn-ctrl" id="btn-zoom-reset" title="Ajuster à la fenêtre">Ajuster</button>
+        </div>
         <div class="time-display" id="time-display">00:00.000 / 00:00.000</div>
       </div>
       <div class="summary-row">
@@ -438,6 +444,7 @@ function renderTrimming() {
         bords pour couper le silence/déchet — coupe définitive, avant l'envoi.
         <strong>DÉBUT</strong> (cyan) / <strong>TRANSITION</strong>
         (rouge) : cue points, ni l'un ni l'autre n'est obligatoire, affinables après import.
+        Zoomez (➕/➖) pour les placer avec précision, défilement horizontal une fois zoomé.
       </p>
       <div class="actions">
         <button class="btn-secondary" id="btn-skip-track">Passer (garder tel quel)</button>
@@ -453,6 +460,23 @@ function renderTrimming() {
 }
 
 let trimMarkers = null // { trimStart, trimEnd, cueInPos, cueOutPos, keepRegion, cueInRegion, cueOutRegion }
+// fitPxPerSec = pixels/seconde qui remplit exactement le conteneur sans scroll (niveau ×1) ;
+// recalculé à chaque 'ready' (largeur dispo + durée changent à chaque piste/fichier). Les
+// régions WaveSurfer sont positionnées en % de la durée totale (cf. regions.esm.js
+// renderPosition, `left:100*start/totalDuration+"%"`) donc aucun recalcul manuel n'est
+// nécessaire pour rester alignées quand le zoom change — uniquement le niveau à appliquer.
+let waveZoom = { level: 1, fitPxPerSec: 0 }
+const ZOOM_MIN = 1
+const ZOOM_MAX = 40
+
+function applyZoom(level) {
+  waveZoom.level = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, level))
+  if (wavesurfer && waveZoom.fitPxPerSec > 0) {
+    wavesurfer.zoom(waveZoom.fitPxPerSec * waveZoom.level)
+  }
+  const $zoomLevel = document.getElementById('zoom-level')
+  if ($zoomLevel) $zoomLevel.textContent = `×${waveZoom.level % 1 === 0 ? waveZoom.level : waveZoom.level.toFixed(1)}`
+}
 
 // Généralisé (Phase 4) pour servir aussi bien la préecoute CD (/rip-preview/:n) que celle
 // des fichiers locaux (/files/preview/:id) — même waveform, mêmes régions, seule l'URL
@@ -492,6 +516,11 @@ function setupTrimWaveform(previewUrl, onReady) {
 
   wavesurfer.on('ready', () => {
     const dur = wavesurfer.getDuration()
+    const containerWidth = document.getElementById('waveform')?.clientWidth || 0
+    // -1px de marge : évite qu'un arrondi ceil() interne à wavesurfer (scrollWidth vs
+    // clientWidth) ne déclenche une barre de scroll fantôme dès le niveau ×1 (fit exact).
+    waveZoom.fitPxPerSec = dur > 0 && containerWidth > 1 ? (containerWidth - 1) / dur : 0
+    applyZoom(1)
     trimMarkers.trimStart = 0
     trimMarkers.trimEnd = dur
     trimMarkers.cueInPos = 0
@@ -512,6 +541,9 @@ function setupTrimWaveform(previewUrl, onReady) {
 
   document.getElementById('btn-playpause').onclick = () => wavesurfer.playPause()
   document.getElementById('btn-stop').onclick = () => wavesurfer.stop()
+  document.getElementById('btn-zoom-in').onclick = () => applyZoom(waveZoom.level * 2)
+  document.getElementById('btn-zoom-out').onclick = () => applyZoom(waveZoom.level / 2)
+  document.getElementById('btn-zoom-reset').onclick = () => applyZoom(1)
   document.getElementById('btn-preview-start').onclick = () => {
     wavesurfer.setTime(trimMarkers.cueInPos)
     wavesurfer.play()
@@ -862,6 +894,12 @@ function renderFilesTrimming() {
           <button class="btn-ctrl" id="btn-reset">Tout réinitialiser</button>
           <button class="btn-ctrl" id="btn-auto-cue">🔍 Détecter automatiquement</button>
         </div>
+        <div class="zoom-group">
+          <button class="btn-ctrl" id="btn-zoom-out" title="Zoom arrière">➖</button>
+          <span class="zoom-level" id="zoom-level">×1</span>
+          <button class="btn-ctrl" id="btn-zoom-in" title="Zoom avant (précision des cue points)">➕</button>
+          <button class="btn-ctrl" id="btn-zoom-reset" title="Ajuster à la fenêtre">Ajuster</button>
+        </div>
         <div class="time-display" id="time-display">00:00.000 / 00:00.000</div>
       </div>
       <div class="summary-row">
@@ -886,6 +924,7 @@ function renderFilesTrimming() {
         (rouge) : cue points, ni l'un ni l'autre n'est obligatoire, affinables après import.
         « Détecter automatiquement » propose des positions à partir des silences détectés.
         BPM et tonalité sont calculés automatiquement sur la piste entière.
+        Zoomez (➕/➖) pour placer les cue points avec précision, défilement horizontal une fois zoomé.
       </p>
       <div class="actions">
         <button class="btn-secondary" id="btn-skip-file">Passer (garder tel quel)</button>
