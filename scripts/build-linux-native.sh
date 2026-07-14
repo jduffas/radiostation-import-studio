@@ -46,13 +46,22 @@ sudo apt-get install -y -qq \
 # recouvrable en lisant le binaire (vérifié : `strings` n'y trouve aucune ligne de code
 # source, seulement les littéraux de chaînes attendus dans n'importe quel binaire).
 echo "→ Installation dépendances Python (Nuitka)..."
-pip install --quiet -r "$ROOT_DIR/python-tray/requirements.txt" nuitka ordered-set zstandard
+# PEP 668 : Debian/Raspberry Pi OS Bookworm+ refuse un `pip install` système
+# ("externally-managed-environment") — CI GitHub (ubuntu-latest) n'a pas cette restriction,
+# d'où le fait que ça n'était jamais apparu avant un build local sur ce type de machine.
+# Venv dédié au build, avec --system-site-packages pour garder l'accès à `gi` (PyGObject,
+# bindings GTK — paquet apt `python3-gi`, jamais installable proprement via pip).
+PY_VENV="$DIST_DIR/build-venv"
+rm -rf "$PY_VENV"
+python3 -m venv --system-site-packages "$PY_VENV"
+PY_VENV_PY="$PY_VENV/bin/python3"
+"$PY_VENV_PY" -m pip install --quiet -r "$ROOT_DIR/python-tray/requirements.txt" nuitka ordered-set zstandard
 sudo apt-get install -y -qq patchelf gcc
 
 echo "→ Compilation Nuitka (--standalone, peut prendre plusieurs minutes)..."
 NUITKA_OUT="$DIST_DIR/nuitka"
 rm -rf "$NUITKA_OUT"
-python3 -m nuitka \
+"$PY_VENV_PY" -m nuitka \
     --standalone \
     --follow-imports \
     --include-package=gi \
@@ -138,8 +147,8 @@ printf '{"name":"ffprobe-static","version":"3.1.0","main":"index.js"}\n' \
 
 echo "  node_modules après  : $(du -sh "$MODS" | cut -f1)"
 
-# Icône PNG 256×256
-python3 - << PYICON
+# Icône PNG 256×256 (Pillow n'est installé que dans le venv de build, cf. plus haut)
+"$PY_VENV_PY" - << PYICON
 from PIL import Image, ImageDraw
 img  = Image.new("RGBA", (256, 256), (0, 0, 0, 0))
 draw = ImageDraw.Draw(img)
@@ -194,7 +203,7 @@ fi
 ARCH="$APPIMAGE_ARCH" "$APPIMAGETOOL" --no-appstream "$APPDIR" "$DIST_DIR/RadioStation-Import-Studio.AppImage"
 
 # Nettoyage
-rm -rf "$NUITKA_OUT" "$APPDIR"
+rm -rf "$NUITKA_OUT" "$APPDIR" "$PY_VENV"
 rm -f /tmp/node.tar.gz "/tmp/$NODE_PKG" 2>/dev/null || true
 
 echo ""
