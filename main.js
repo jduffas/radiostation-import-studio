@@ -152,10 +152,19 @@ async function analyzeVocalZones(wavPath, durationMs) {
     const statsPath = path.join(os.tmpdir(), `rsanalysis-${Date.now()}-${Math.random().toString(36).slice(2)}.txt`);
     const nullOutput = PLATFORM === 'win32' ? 'NUL' : '/dev/null';
 
+    // asetnsamples force des frames d'exactement 22050 échantillons (500 ms à 44,1 kHz —
+    // les WAV rippés d'un CD sont toujours en 44,1 kHz) et reset=1 réinitialise les stats à
+    // chaque frame → vraie RMS par fenêtre de 500 ms. Bug réel corrigé (16 juil 2026) :
+    // l'ancien `astats=reset=22050` comptait 22050 FRAMES (~8 min, jamais atteint) et non
+    // des échantillons — les RMS étaient donc cumulatives depuis le début de la piste, et
+    // seules les zones calmes en tout début de piste pouvaient passer sous le seuil ; toute
+    // zone sans voix au milieu ou en fin de piste était structurellement indétectable
+    // (démontré par tests/vocal-analysis-tests.js avant/après).
     const filterChain = [
       'highpass=f=300',
       'lowpass=f=3500',
-      'astats=metadata=1:reset=22050',
+      'asetnsamples=n=22050',
+      'astats=metadata=1:reset=1',
       `ametadata=mode=print:file=${statsPath}`,
     ].join(',');
 
