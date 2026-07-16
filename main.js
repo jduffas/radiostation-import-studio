@@ -1326,7 +1326,6 @@ async function doRip(backendUrl, authToken, trackNumbers = null) {
 async function finishRip() {
   if (!_pendingRip) return;
   const { backendUrl, authToken, files, rippedPaths } = _pendingRip;
-  _pendingRip = null;
   ripState.pendingFiles = undefined;
 
   try {
@@ -1344,14 +1343,20 @@ async function finishRip() {
     ripState.filesMetadata = (upResult.files || []).map(f => f.metadata || {});
     ripState.progress = 100;
     ripState.status = 'done';
+    // Nettoyage uniquement après succès confirmé — cf. catch ci-dessous : un rip peut
+    // prendre plusieurs minutes, un simple accroc réseau lors de l'upload final ne doit
+    // jamais forcer à tout re-riper le CD (bug réel constaté : EHOSTUNREACH transitoire
+    // supprimait quand même les fichiers déjà rippés).
+    _pendingRip = null;
+    for (const fpath of rippedPaths) {
+      try { fs.unlinkSync(fpath); } catch { /* ignore */ }
+    }
   } catch (e) {
     ripState.status = 'error';
     ripState.error = e.message;
     console.error('[finishRip]', e.message);
-  } finally {
-    for (const fpath of rippedPaths) {
-      try { fs.unlinkSync(fpath); } catch { /* ignore */ }
-    }
+    // _pendingRip conservé volontairement : POST /rip/retry-upload relance l'upload avec
+    // les mêmes fichiers déjà sur disque, sans repasser par le lecteur CD.
   }
 }
 
@@ -1532,6 +1537,18 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // ── Réessai de l'upload final après échec réseau (ex. EHOSTUNREACH) — les fichiers
+  // rippés restent sur disque (cf. finishRip, _pendingRip non vidé sur erreur), pas besoin
+  // de relancer le rip CD depuis le début.
+  if (req.method === 'POST' && pathname === '/rip/retry-upload') {
+    if (ripState.status !== 'error' || !_pendingRip) {
+      return jsonResp(res, 409, { error: 'Aucun envoi en échec à réessayer' });
+    }
+    finishRip().catch(e => console.error('[rip/retry-upload]', e));
+    jsonResp(res, 200, { status: 'retrying' });
+    return;
+  }
+
   // ══ Import de fichiers locaux hors CD (Phase 4) ═══════════════════════════════
   // Pas de machine à états serveur ici (contrairement au rip CD, pas de lecture disque
   // longue) : chaque appel ffmpeg est attendu et répond directement — la webview pilote
@@ -1700,9 +1717,11 @@ const server = http.createServer(async (req, res) => {
           file_ids: (upResult.files || []).map(f => f.file_id).filter(Boolean),
           files_metadata: (upResult.files || []).map(f => f.metadata || {}),
         });
-      } catch (e) {
-        jsonResp(res, 502, { error: e.message });
-      } finally {
+        // Nettoyage seulement après succès confirmé : un accroc réseau lors de l'upload ne
+        // doit pas supprimer les fichiers déjà convertis/coupés — même bug que finishRip()
+        // (CD) évité ici. Sur erreur, _localFiles reste utilisable pour un nouvel essai via
+        // un second POST /files/finish avec les mêmes file_id (aucun endpoint dédié : le
+        // frontend renvoie simplement la même requête).
         for (const it of items) {
           const entry = _localFiles.get(it.file_id);
           if (entry) {
@@ -1710,6 +1729,8 @@ const server = http.createServer(async (req, res) => {
             _localFiles.delete(it.file_id);
           }
         }
+      } catch (e) {
+        jsonResp(res, 502, { error: e.message });
       }
     });
     return;

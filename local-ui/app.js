@@ -395,10 +395,23 @@ function renderRipError() {
     <div class="card">
       <div class="card-body">
         <div class="error-box">Erreur : ${escapeHtml(currentRipState.error || 'inconnue')}</div>
-        <button class="btn" id="btn-back-idle">Retour</button>
+        <p class="hint">Si l'erreur vient du réseau (ex. serveur RadioStation injoignable), les
+        pistes déjà rippées sont conservées : "Réessayer l'envoi" relance juste l'upload, sans
+        repasser par le lecteur CD.</p>
+        <button class="btn" id="btn-retry-upload">Réessayer l'envoi</button>
+        <button class="btn-secondary" id="btn-back-idle">Retour (abandonner)</button>
       </div>
     </div>`
   document.getElementById('btn-back-idle').onclick = init
+  document.getElementById('btn-retry-upload').onclick = async () => {
+    try {
+      await api('/rip/retry-upload', { method: 'POST' })
+      $app.innerHTML = '<div class="card"><div class="card-body"><p class="loading">Nouvel essai d\'envoi…</p></div></div>'
+      resumePolling()
+    } catch (e) {
+      alert("Impossible de réessayer l'envoi : " + e.message)
+    }
+  }
 }
 
 // ---- Coupe locale + cue points (statut 'trimming') ----
@@ -1109,6 +1122,11 @@ function renderFilesSend() {
   }
 
   const allDone = filesItems.every(it => it.sendStatus === 'done')
+  // Échec du POST /files/finish groupé (ex. réseau) : aucun backendFileId, donc
+  // "Envoyer ce fichier" reste désactivé pour tout le monde — sans ce bouton, aucun moyen
+  // de réessayer. Les fichiers convertis/coupés ne sont plus supprimés côté serveur sur
+  // cet échec (cf. main.js /files/finish), un nouveau POST /files/finish suffit.
+  const needsFinishRetry = filesItems.some(it => !it.backendFileId)
   const rows = filesItems.map((it, i) => `
     <div class="card">
       <div class="card-header">${escapeHtml(it.title || it.name)}${it.sendStatus === 'done' ? ' ✅' : it.sendStatus === 'error' ? ' ⚠️' : ''}</div>
@@ -1131,7 +1149,8 @@ function renderFilesSend() {
     ${allDone ? `
       <div class="success-box">Tous les fichiers ont été envoyés vers RadioStation.</div>
       <button class="btn" id="btn-new-files">Importer d'autres fichiers</button>
-    ` : `<button class="btn" id="btn-send-all-files">Tout envoyer</button>`}
+    ` : needsFinishRetry ? `<button class="btn" id="btn-retry-finish">Réessayer l'envoi vers RadioStation</button>`
+      : `<button class="btn" id="btn-send-all-files">Tout envoyer</button>`}
   `
 
   document.querySelectorAll('.fmeta-title').forEach(el => el.oninput = () => { filesItems[+el.dataset.idx].title = el.value })
@@ -1141,6 +1160,8 @@ function renderFilesSend() {
   document.querySelectorAll('.btn-send-file').forEach(el => { el.onclick = () => sendFileItem(+el.dataset.idx) })
   const btnAll = document.getElementById('btn-send-all-files')
   if (btnAll) btnAll.onclick = sendAllFileItems
+  const btnRetryFinish = document.getElementById('btn-retry-finish')
+  if (btnRetryFinish) btnRetryFinish.onclick = finishFilesUpload
   const btnNew = document.getElementById('btn-new-files')
   if (btnNew) btnNew.onclick = () => enterFilesMode()
 }
