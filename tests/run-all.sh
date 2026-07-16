@@ -7,9 +7,11 @@ cd "$(dirname "$0")"
 ./generate-fixtures.sh
 node unit-tests.js
 node http-tests.js
+node vocal-analysis-tests.js
 if node -e "require(process.env.PLAYWRIGHT_MODULE || 'playwright')" 2>/dev/null; then
   node ui-tests.js
+  node zoom-tests.js
 else
-  echo "(ui-tests.js sauté : playwright introuvable — NODE_PATH ou PLAYWRIGHT_MODULE requis)"
+  echo "(ui-tests.js/zoom-tests.js sautés : playwright introuvable — NODE_PATH ou PLAYWRIGHT_MODULE requis)"
 fi
 echo "SUITE COMPLÈTE OK"
