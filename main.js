@@ -1088,6 +1088,19 @@ function normalizeEditPayload(payload, totalDurationMs) {
   const fadeOutMs = clampFade(payload.fade_out_ms);
   const curve = (v) => (AFADE_CURVES.has(String(v)) ? String(v) : 'tri');
 
+  // Courbe d'automation de volume (v1.9) : points {time_ms, db} exprimés dans la timeline
+  // du fichier FINAL (le client remappe via toFinal avant envoi, comme les cue points).
+  // Tri + clamp dB [-60, +12] + fusion des points à moins de 1 ms (pente infinie sinon).
+  const rawPoints = Array.isArray(payload.volume_points) ? payload.volume_points : [];
+  const volumePoints = [];
+  for (const p of rawPoints) {
+    const timeMs = Math.max(0, Math.round(Number(p?.time_ms) || 0));
+    const db = Math.max(-60, Math.min(12, Number(p?.db) || 0));
+    volumePoints.push({ timeMs, db });
+  }
+  volumePoints.sort((a, b) => a.timeMs - b.timeMs);
+  const dedupedPoints = volumePoints.filter((p, i) => i === 0 || p.timeMs - volumePoints[i - 1].timeMs >= 1);
+
   return {
     keepRanges,
     volumeDb,
@@ -1095,10 +1108,32 @@ function normalizeEditPayload(payload, totalDurationMs) {
     fadeInCurve: curve(payload.fade_in_curve),
     fadeOutMs,
     fadeOutCurve: curve(payload.fade_out_curve),
+    volumePoints: dedupedPoints,
     keptDurationMs,
     // false = simple coupe tête/queue → trimWavFile (chemin historique) suffit.
-    needsFull: merged.length > 0 || Math.abs(volumeDb) > 0.01 || fadeInMs > 0 || fadeOutMs > 0,
+    needsFull: merged.length > 0 || Math.abs(volumeDb) > 0.01 || fadeInMs > 0 || fadeOutMs > 0
+      || dedupedPoints.length > 0,
   };
+}
+
+/**
+ * Expression FFmpeg de gain linéaire par morceaux pour `volume=volume='EXPR':eval=frame`
+ * — port de backend/app/services/audio_editor.py::build_volume_filter_expr (mêmes règles :
+ * constant avant le premier point et après le dernier). Les virgules de if(...) sont
+ * protégées par les quotes simples dans le filtergraph.
+ */
+function buildVolumeExpr(points) {
+  if (!points.length) return '1.0';
+  const gains = points.map(p => [p.timeMs / 1000, Math.pow(10, p.db / 20)]);
+  if (gains.length === 1) return gains[0][1].toFixed(6);
+  let expr = gains[gains.length - 1][1].toFixed(6);
+  for (let i = gains.length - 1; i > 0; i--) {
+    const [t0, g0] = gains[i - 1];
+    const [t1, g1] = gains[i];
+    const slope = (g1 - g0) / (t1 - t0);
+    expr = `if(lt(t,${t1.toFixed(3)}),(${g0.toFixed(6)}+${slope.toFixed(6)}*(t-${t0.toFixed(3)})),${expr})`;
+  }
+  return `if(lt(t,${gains[0][0].toFixed(3)}),${gains[0][1].toFixed(6)},${expr})`;
 }
 
 /**
@@ -1108,6 +1143,7 @@ function normalizeEditPayload(payload, totalDurationMs) {
  */
 function editNeedsFullPass(payload) {
   return (Array.isArray(payload.cuts) && payload.cuts.length > 0)
+    || (Array.isArray(payload.volume_points) && payload.volume_points.length > 0)
     || Math.abs(Number(payload.volume_db) || 0) > 0.01
     || (Number(payload.fade_in_ms) || 0) > 0
     || (Number(payload.fade_out_ms) || 0) > 0;
@@ -1120,6 +1156,10 @@ function buildEditFilter(edit) {
 
   const post = [];
   if (Math.abs(edit.volumeDb) > 0.01) post.push(`volume=${edit.volumeDb.toFixed(2)}dB`);
+  if (edit.volumePoints && edit.volumePoints.length > 0) {
+    // L'ordre volume/afade est indifférent (gains multiplicatifs par échantillon).
+    post.push(`volume=volume='${buildVolumeExpr(edit.volumePoints)}':eval=frame`);
+  }
   if (edit.fadeInMs > 0) {
     post.push(`afade=t=in:st=0:d=${(edit.fadeInMs / 1000).toFixed(3)}:curve=${edit.fadeInCurve}`);
   }

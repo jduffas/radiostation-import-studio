@@ -179,6 +179,15 @@ async function j(url, opts) {
   });
   check('/files/trim tout coupé → 500 explicite', s.status === 500 && /conservé/i.test(s.body.error || ''), JSON.stringify(s));
 
+  // ── /files/trim avec courbe de volume seule (v1.9) : durée inchangée ──
+  s = await j(`${BASE}/files/upload`, { method: 'POST', body: mkFd('Vol Curve - Test.wav', wavBuf) });
+  const fidVol = s.body.file_id;
+  s = await j(`${BASE}/files/trim`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ file_id: fidVol, volume_points: [{ time_ms: 0, db: 0 }, { time_ms: 8000, db: -24 }] }),
+  });
+  check('/files/trim courbe de volume seule → durée inchangée 10s', s.status === 200 && Math.abs(s.body.duration_seconds - 10) < 0.1, JSON.stringify(s.body));
+
   // ── /files/analyze-vocal (zones sans voix, à la demande) ──
   s = await j(`${BASE}/files/analyze-vocal`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ file_id: fidEdit }) });
   check('/files/analyze-vocal → tableau zones', s.status === 200 && Array.isArray(s.body.zones), JSON.stringify(s.body));

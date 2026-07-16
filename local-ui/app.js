@@ -527,6 +527,7 @@ function applyZoom(level) {
 // par le flux fichiers locaux pour lancer l'analyse BPM/tonalité côté client, cf. analyzeBpmKey).
 function setupTrimWaveform(previewUrl, onReady) {
   if (wavesurfer) { wavesurfer.destroy(); wavesurfer = null }
+  volOverlay = null // le DOM #waveform est recréé à chaque piste/fichier
   const regions = RegionsPlugin.create()
   wavesurfer = WaveSurfer.create({
     container: '#waveform',
@@ -557,6 +558,7 @@ function setupTrimWaveform(previewUrl, onReady) {
     cuts: [], cutSeq: 0, // [{id, region}]
     disableDragSel: null,
     volumeDb: 0, fadeInMs: 0, fadeInCurve: 'tri', fadeOutMs: 0, fadeOutCurve: 'tri',
+    volumePoints: [], // [{timeMs, db}] — courbe d'automation (timeline waveform)
     // Bug réel trouvé et corrigé (Phase 4) : le bouton "Tout réinitialiser" appelait déjà
     // trimMarkers?.resetToFull() sans que la méthode existe jamais — clic sans effet
     // (silencieux, aucune région ne bougeait). Généralisé en même temps que cette fonction.
@@ -574,6 +576,9 @@ function setupTrimWaveform(previewUrl, onReady) {
       this.overlayStart = null; this.overlayEnd = null; this.overlayTouched = false
       this.volumeDb = 0; this.fadeInMs = 0; this.fadeOutMs = 0
       this.fadeInCurve = 'tri'; this.fadeOutCurve = 'tri'
+      this.volumePoints = []
+      renderVolumeCurve()
+      updateVolumeOverlayVisibility()
       wavesurfer?.setVolume(1)
       renderModePanel()
       updateSummary()
@@ -614,6 +619,8 @@ function setupTrimWaveform(previewUrl, onReady) {
     trimMarkers.cueOutRegion = regions.addRegion({ id: 'cue-out', start: dur, color: 'rgba(244,67,54,0.9)', drag: true, resize: false, content: markerLabel('TRANSITION', '#f44336') })
     // Applique l'interactivité du mode courant (les régions viennent seulement d'exister) —
     // en mode 'cue' par défaut, comportement identique à avant l'éditeur unifié.
+    ensureVolumeOverlay()
+    updateVolumeOverlayVisibility()
     setEditorMode(trimMarkers.mode)
     updateSummary()
     onReady?.()
@@ -621,6 +628,7 @@ function setupTrimWaveform(previewUrl, onReady) {
 
   wavesurfer.on('timeupdate', (t) => {
     document.getElementById('time-display').textContent = `${formatTime(t)} / ${formatTime(wavesurfer.getDuration())}`
+    if (trimMarkers?.volumePoints.length) updatePreviewVolume(t)
   })
 
   regions.on('region-updated', onRegionMoved)
@@ -836,6 +844,18 @@ function setEditorMode(mode) {
   }
 
   if (mode === 'jingle') ensureVocalZones()
+
+  // Mode volume : zoom verrouillé à ×1 — la courbe SVG est mappée sur la largeur visible,
+  // elle n'est alignée avec la waveform qu'en vue non zoomée (pas de scroll horizontal).
+  if (mode === 'volume') applyZoom(1)
+  ;['btn-zoom-in', 'btn-zoom-out', 'btn-zoom-reset'].forEach(id => {
+    const el = document.getElementById(id)
+    if (el) el.disabled = (mode === 'volume')
+  })
+  ensureVolumeOverlay()
+  updateVolumeOverlayVisibility()
+  renderVolumeCurve()
+
   renderModePanel()
 }
 
@@ -947,12 +967,19 @@ function renderModePanel() {
   const curveOptions = (selected) => FADE_CURVES
     .map(([v, label]) => `<option value="${v}" ${v === selected ? 'selected' : ''}>${label}</option>`).join('')
   const volLabel = (db) => `${db > 0 ? '+' : ''}${db.toFixed(1)} dB`
+  const nPoints = trimMarkers.volumePoints.length
   $panel.innerHTML = `
     <p class="hint mode-hint">
       <strong>Volume &amp; fondus</strong> : appliqués définitivement au fichier envoyé.
-      Le volume s'entend à la lecture ici (aperçu limité aux baisses) ; les fondus ne sont
-      pas prévisualisés — choisissez la durée et le type de courbe.
+      <strong>Courbe de volume</strong> : cliquez sur la ligne jaune de la forme d'onde pour
+      ajouter un point, glissez pour déplacer, Ctrl+clic (ou clic droit) pour supprimer —
+      le zoom est verrouillé dans ce mode. Le volume s'entend à la lecture (aperçu limité
+      aux baisses) ; les fondus ne sont pas prévisualisés.
     </p>
+    <div class="panel-row">
+      <span class="panel-info">Courbe : <strong>${nPoints}</strong> point(s)</span>
+      <button class="btn-ctrl" id="btn-vol-clear" ${nPoints ? '' : 'disabled'}>Effacer la courbe</button>
+    </div>
     <div class="panel-row volume-row">
       <label class="panel-field">Volume
         <input type="range" id="vol-slider" min="-12" max="12" step="0.5" value="${trimMarkers.volumeDb}">
@@ -973,7 +1000,15 @@ function renderModePanel() {
     document.getElementById('vol-value').textContent = volLabel(trimMarkers.volumeDb)
     // Aperçu à la lecture : le volume d'un élément média est plafonné à 1, seule une
     // baisse est donc réellement audible ici — le gain positif ne s'applique qu'au rendu.
-    wavesurfer?.setVolume(Math.min(1, Math.pow(10, trimMarkers.volumeDb / 20)))
+    updatePreviewVolume(wavesurfer?.getCurrentTime() || 0)
+  }
+  const $volClear = document.getElementById('btn-vol-clear')
+  if ($volClear) $volClear.onclick = () => {
+    trimMarkers.volumePoints = []
+    renderVolumeCurve()
+    updateVolumeOverlayVisibility()
+    renderModePanel()
+    updatePreviewVolume(wavesurfer?.getCurrentTime() || 0)
   }
   document.getElementById('fade-in-s').onchange = (e) => {
     trimMarkers.fadeInMs = Math.max(0, Math.min(30, Number(e.target.value) || 0)) * 1000
@@ -1048,6 +1083,171 @@ function regionTag(text, color) {
   el.style.cssText = `background:${color};color:#fff;padding:2px 8px;border-radius:4px;font-size:10px;font-weight:bold;white-space:nowrap;position:absolute;top:2px;left:50%;transform:translateX(-50%);user-select:none;pointer-events:none;`
   el.textContent = text
   return el
+}
+
+// ---- Courbe d'automation de volume superposée à la waveform (v1.9) ─────────────
+// Portage vanilla JS de VolumeAutomationEditor.vue du site : SVG absolu au-dessus de la
+// forme d'onde, gain linéaire par morceaux. Points en timeline ORIGINALE de la waveform,
+// remappés (toFinal) au moment de l'envoi comme les cue points. ⚠️ La courbe est mappée
+// sur la largeur visible : alignée uniquement à zoom ×1 → zoom verrouillé en mode volume.
+
+const VOL_DB_MAX = 12
+const VOL_DB_MIN = -60
+const VOL_DB_RANGE = VOL_DB_MAX - VOL_DB_MIN
+const VOL_GRIDLINES = [-48, -24, -12, 0, 6]
+
+let volOverlay = null // { host, svg, clearBtn } — recréé à chaque nouvelle piste
+
+function volDbToLinear(db) { return Math.pow(10, db / 20) }
+
+function volumeGainAt(tMs) {
+  const pts = [...trimMarkers.volumePoints].sort((a, b) => a.timeMs - b.timeMs)
+  if (!pts.length) return 1.0
+  if (tMs <= pts[0].timeMs) return volDbToLinear(pts[0].db)
+  if (tMs >= pts[pts.length - 1].timeMs) return volDbToLinear(pts[pts.length - 1].db)
+  for (let i = 0; i < pts.length - 1; i++) {
+    if (tMs >= pts[i].timeMs && tMs < pts[i + 1].timeMs) {
+      const frac = (tMs - pts[i].timeMs) / (pts[i + 1].timeMs - pts[i].timeMs)
+      return volDbToLinear(pts[i].db) + (volDbToLinear(pts[i + 1].db) - volDbToLinear(pts[i].db)) * frac
+    }
+  }
+  return 1.0
+}
+
+// Volume de lecture effectif = slider global (dB, plafonné à 1) × courbe normalisée par
+// son max (les gains > 0 dB ne sont pas prévisualisables, volume média plafonné).
+function updatePreviewVolume(tSeconds) {
+  if (!wavesurfer || !trimMarkers) return
+  let v = Math.min(1, Math.pow(10, (trimMarkers.volumeDb || 0) / 20))
+  if (trimMarkers.volumePoints.length) {
+    const maxGain = Math.max(1, ...trimMarkers.volumePoints.map(p => volDbToLinear(p.db)))
+    v *= Math.min(1, volumeGainAt(tSeconds * 1000) / maxGain)
+  }
+  wavesurfer.setVolume(Math.max(0, Math.min(1, v)))
+}
+
+function ensureVolumeOverlay() {
+  if (volOverlay) return volOverlay
+  const $wf = document.getElementById('waveform')
+  if (!$wf) return null
+  const host = document.createElement('div')
+  host.className = 'vol-overlay'
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
+  svg.setAttribute('class', 'vol-svg')
+  host.appendChild(svg)
+  const clearBtn = document.createElement('button')
+  clearBtn.className = 'vol-clear-btn'
+  clearBtn.textContent = 'Effacer la courbe'
+  clearBtn.onclick = (e) => {
+    e.stopPropagation()
+    trimMarkers.volumePoints = []
+    renderVolumeCurve()
+    renderModePanel()
+    updatePreviewVolume(wavesurfer?.getCurrentTime() || 0)
+  }
+  host.appendChild(clearBtn)
+  $wf.appendChild(host)
+  volOverlay = { host, svg, clearBtn }
+  renderVolumeCurve()
+  return volOverlay
+}
+
+function updateVolumeOverlayVisibility() {
+  if (!volOverlay || !trimMarkers) return
+  const active = trimMarkers.mode === 'volume'
+  // Courbe visible dès qu'il y a des points (informative), interactive en mode volume seul.
+  volOverlay.host.style.display = (active || trimMarkers.volumePoints.length) ? '' : 'none'
+  volOverlay.host.classList.toggle('vol-locked', !active)
+  volOverlay.clearBtn.style.display = active && trimMarkers.volumePoints.length ? '' : 'none'
+}
+
+function renderVolumeCurve() {
+  if (!volOverlay || !wavesurfer || !trimMarkers) return
+  const w = volOverlay.host.clientWidth || 600
+  const h = volOverlay.host.clientHeight || 140
+  const dur = wavesurfer.getDuration() || 1
+  const dbToY = (db) => ((VOL_DB_MAX - db) / VOL_DB_RANGE) * h
+  const timeToX = (tMs) => (tMs / (dur * 1000)) * w
+
+  const pts = [...trimMarkers.volumePoints].sort((a, b) => a.timeMs - b.timeMs)
+  const curve = []
+  if (pts.length) {
+    curve.push([0, dbToY(pts[0].db)])
+    for (const p of pts) curve.push([timeToX(p.timeMs), dbToY(p.db)])
+    curve.push([w, dbToY(pts[pts.length - 1].db)])
+  }
+  const poly = curve.map(([x, y]) => `${x},${y}`).join(' ')
+  const y0 = dbToY(0)
+
+  let inner = ''
+  for (const db of VOL_GRIDLINES) {
+    inner += `<line x1="0" x2="${w}" y1="${dbToY(db)}" y2="${dbToY(db)}" class="${db === 0 ? 'vol-zero' : 'vol-grid'}" style="pointer-events:none"></line>`
+    inner += `<text x="4" y="${dbToY(db) - 2}" class="vol-label" style="pointer-events:none">${db >= 0 ? '+' + db : db}dB</text>`
+  }
+  if (curve.length >= 2) {
+    let fill = `M ${curve[0][0]} ${y0} L ${poly.split(' ').join(' L ')} L ${curve[curve.length - 1][0]} ${y0} Z`
+    inner += `<path d="${fill}" class="vol-fill" style="pointer-events:none"></path>`
+    inner += `<polyline points="${poly}" class="vol-line" style="pointer-events:none"></polyline>`
+    inner += `<polyline points="${poly}" class="vol-hit" data-role="hit"></polyline>`
+  } else {
+    inner += `<line x1="0" x2="${w}" y1="${y0}" y2="${y0}" class="vol-zero" style="pointer-events:none"></line>`
+    inner += `<line x1="0" x2="${w}" y1="${y0}" y2="${y0}" class="vol-hit" data-role="hit"></line>`
+  }
+  pts.forEach((p) => {
+    const i = trimMarkers.volumePoints.indexOf(p)
+    inner += `<circle cx="${timeToX(p.timeMs)}" cy="${dbToY(p.db)}" r="6" class="vol-point" data-idx="${i}"></circle>`
+  })
+  volOverlay.svg.setAttribute('viewBox', `0 0 ${w} ${h}`)
+  volOverlay.svg.setAttribute('width', w)
+  volOverlay.svg.setAttribute('height', h)
+  volOverlay.svg.innerHTML = inner
+
+  const svgPoint = (evt) => {
+    const r = volOverlay.svg.getBoundingClientRect()
+    return { x: evt.clientX - r.left, y: evt.clientY - r.top }
+  }
+  const yToDb = (y) => Math.max(VOL_DB_MIN, Math.min(VOL_DB_MAX, VOL_DB_MAX - (y / h) * VOL_DB_RANGE))
+  const xToTimeMs = (x) => Math.max(0, Math.min(dur * 1000, Math.round((x / w) * dur * 1000)))
+
+  volOverlay.svg.querySelectorAll('[data-role="hit"]').forEach(el => {
+    el.addEventListener('click', (e) => {
+      e.stopPropagation()
+      const { x, y } = svgPoint(e)
+      trimMarkers.volumePoints.push({ timeMs: xToTimeMs(x), db: Math.round(yToDb(y) * 10) / 10 })
+      renderVolumeCurve()
+      renderModePanel()
+      updateVolumeOverlayVisibility()
+    })
+  })
+  volOverlay.svg.querySelectorAll('.vol-point').forEach(el => {
+    const idx = Number(el.dataset.idx)
+    el.addEventListener('contextmenu', (e) => { e.preventDefault(); e.stopPropagation(); deleteVolumePoint(idx) })
+    el.addEventListener('mousedown', (e) => {
+      e.stopPropagation()
+      e.preventDefault()
+      if (e.ctrlKey || e.metaKey) { deleteVolumePoint(idx); return }
+      const onMove = (me) => {
+        const { x, y } = svgPoint(me)
+        trimMarkers.volumePoints[idx] = { timeMs: xToTimeMs(x), db: Math.round(yToDb(y) * 10) / 10 }
+        renderVolumeCurve()
+      }
+      const onUp = () => {
+        document.removeEventListener('mousemove', onMove)
+        document.removeEventListener('mouseup', onUp)
+        renderModePanel()
+      }
+      document.addEventListener('mousemove', onMove)
+      document.addEventListener('mouseup', onUp)
+    })
+  })
+}
+
+function deleteVolumePoint(idx) {
+  trimMarkers.volumePoints.splice(idx, 1)
+  renderVolumeCurve()
+  renderModePanel()
+  updateVolumeOverlayVisibility()
+  updatePreviewVolume(wavesurfer?.getCurrentTime() || 0)
 }
 
 // ---- Zone « jingle intérieur » (overlay backend) ----
@@ -1184,7 +1384,8 @@ function collectEditPayload() {
   const volumeDb = Math.abs(trimMarkers.volumeDb) > 0.01 ? trimMarkers.volumeDb : 0
   const fadeInMs = Math.round(trimMarkers.fadeInMs)
   const fadeOutMs = Math.round(trimMarkers.fadeOutMs)
-  const hasEdit = hasTrim || cuts.length > 0 || volumeDb !== 0 || fadeInMs > 0 || fadeOutMs > 0
+  const hasVolumeCurve = trimMarkers.volumePoints.length > 0
+  const hasEdit = hasTrim || cuts.length > 0 || volumeDb !== 0 || fadeInMs > 0 || fadeOutMs > 0 || hasVolumeCurve
 
   const toFinal = (t) => {
     const clamped = Math.max(trimMarkers.trimStart, Math.min(t, trimMarkers.trimEnd))
@@ -1229,6 +1430,11 @@ function collectEditPayload() {
     end_ms: hasTrim ? Math.round(trimMarkers.trimEnd * 1000) : null,
     cuts: cuts.map(c => ({ start_ms: Math.round(c.start * 1000), end_ms: Math.round(c.end * 1000) })),
     volume_db: volumeDb,
+    // Courbe remappée dans la timeline du fichier FINAL, comme les cue points
+    volume_points: trimMarkers.volumePoints.map(p => ({
+      time_ms: Math.round(toFinal(p.timeMs / 1000) * 1000),
+      db: p.db,
+    })),
     fade_in_ms: fadeInMs,
     fade_in_curve: trimMarkers.fadeInCurve,
     fade_out_ms: fadeOutMs,

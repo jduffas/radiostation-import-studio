@@ -135,6 +135,16 @@ async function waitUp(url, ms = 8000) {
   await page.waitForSelector('#vol-slider', { timeout: 5000 });
   await page.$eval('#vol-slider', el => { el.value = '-6'; el.dispatchEvent(new Event('input')); });
   check('UI fichiers: mode volume, -6.0 dB affiché', (await page.textContent('#vol-value')).includes('-6.0'));
+  // Courbe d'automation (v1.9) : zoom verrouillé + clic sur la ligne → point ajouté
+  check('UI fichiers: zoom verrouillé en mode volume', await page.$eval('#btn-zoom-in', el => el.disabled));
+  // La zone de frappe est une <line> SVG (bounding box de hauteur nulle → « hidden » pour
+  // Playwright) : clic aux coordonnées de la ligne 0 dB (y = 12/72 de la hauteur de l'overlay).
+  await page.waitForSelector('.vol-overlay', { state: 'attached', timeout: 5000 });
+  const volBox = await page.locator('.vol-overlay').boundingBox();
+  await page.mouse.click(volBox.x + volBox.width * 0.5, volBox.y + volBox.height * (12 / 72));
+  const volPoints = await page.locator('.vol-point').count();
+  check('UI fichiers: point de volume ajouté au clic', volPoints === 1, String(volPoints));
+  check('UI fichiers: compteur de points affiché', (await page.textContent('#mode-panel')).includes('1'));
   await page.click('.mode-tab[data-mode="cue"]');
   check('UI fichiers: modes sans erreur JS', pageErrors.length === 0, pageErrors.join(' ; '));
 

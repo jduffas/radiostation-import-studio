@@ -14,7 +14,7 @@ src = src.replace("server.listen(PORT, '127.0.0.1'", "if (process.env.RS_TEST_LI
 src += `\nmodule.exports = { parseToc, computeMbDiscId, isVersionNewer, parseFilenameTitleArtist,
   _parseAstats, _computeVocalZones, isAllowedOrigin, parseMultipart, trimWavFile, msfToLba,
   detectEnergyFromMean, probeLocalDurationSeconds, normalizeEditPayload, buildEditFilter,
-  editNeedsFullPass, applyAudioEdit };\n`;
+  editNeedsFullPass, applyAudioEdit, buildVolumeExpr };\n`;
 fs.writeFileSync(OUT, src);
 
 const M = require(OUT);
@@ -177,6 +177,36 @@ TOTAL   46442 [10:19.17]    (audio only)
   const f3 = M.buildEditFilter(M.normalizeEditPayload({ volume_db: 6, fade_out_ms: 2000, fade_out_curve: 'log' }, 10000));
   check('buildEditFilter: plage unique + effets enchaînés',
     f3.includes('volume=6.00dB') && f3.includes('afade=t=out:st=8.000:d=2.000:curve=log'), f3);
+
+  // ---- Courbe d'automation de volume (v1.9) : buildVolumeExpr + normalisation ----
+  check('volumeExpr: aucun point → 1.0', M.buildVolumeExpr([]) === '1.0');
+  check('volumeExpr: point unique -6dB → gain constant',
+    M.buildVolumeExpr([{ timeMs: 3000, db: -6 }]) === (10 ** (-6 / 20)).toFixed(6));
+  const expr2 = M.buildVolumeExpr([{ timeMs: 0, db: 0 }, { timeMs: 2000, db: -12 }]);
+  check('volumeExpr: 2 points → if imbriqués + pente',
+    expr2.startsWith('if(lt(t,0.000),1.000000,') && expr2.includes('if(lt(t,2.000),(1.000000+') && expr2.endsWith(')'), expr2);
+  const nv = M.normalizeEditPayload({ volume_points: [
+    { time_ms: 5000, db: -100 }, { time_ms: 1000, db: 50 }, { time_ms: 1000.4, db: 0 },
+  ] }, 10000);
+  check('normalize: points triés/clampés/fusionnés (<1ms)',
+    nv.volumePoints.length === 2 && nv.volumePoints[0].timeMs === 1000 && nv.volumePoints[0].db === 12
+    && nv.volumePoints[1].db === -60 && nv.needsFull === true, JSON.stringify(nv.volumePoints));
+
+  // applyAudioEdit ffmpeg réel : courbe constante -6dB → mean_volume baisse d'≈6 dB
+  const measureMean = (f) => {
+    const r = require('node:child_process').spawnSync(
+      'ffmpeg', ['-i', f, '-af', 'volumedetect', '-f', 'null', '-'], { encoding: 'utf8' });
+    const m = /mean_volume:\s*(-?[\d.]+) dB/.exec(r.stderr || '');
+    return m ? parseFloat(m[1]) : null;
+  };
+  const tmpWav4 = path.join(__dirname, '.tmp', 'volcurve.wav');
+  fs.copyFileSync(path.join(FIX, 'Artist One - Nice Song.wav'), tmpWav4);
+  const meanBefore = measureMean(tmpWav4);
+  await M.applyAudioEdit(tmpWav4, { volume_points: [{ time_ms: 0, db: -6 }] });
+  const meanAfter = measureMean(tmpWav4);
+  check('applyAudioEdit: courbe -6dB → mean_volume -6 dB (±1)',
+    meanBefore !== null && meanAfter !== null && Math.abs((meanBefore - meanAfter) - 6) < 1,
+    `avant=${meanBefore} après=${meanAfter}`);
 
   // applyAudioEdit ffmpeg réel : 10s, coupe interne 2s→4s + fondus → 8s
   const tmpWav3 = path.join(__dirname, '.tmp', 'edittest.wav');
