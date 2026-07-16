@@ -186,16 +186,21 @@ main {
    sans bord repérable) ; poignées de bord passées au gris clair et sous les marqueurs
    DÉBUT/TRANSITION en z-index — par défaut elles se superposaient pixel pour pixel avec le
    marqueur TRANSITION en bord de piste, et gagnaient le survol/drag (z-index plus élevé),
-   ce qui faisait déplacer le bord de coupe au lieu du point de transition attendu. */
-#waveform [part~="trim-keep"] {
+   ce qui faisait déplacer le bord de coupe au lieu du point de transition attendu.
+   ⚠️ Syntaxe ::part() OBLIGATOIRE (comme ::part(cursor) ci-dessus) : ces éléments vivent
+   dans le shadow DOM de wavesurfer — un sélecteur descendant `#waveform [part~="…"]` ne
+   les atteint JAMAIS (bug réel : contours/z-index silencieusement sans effet, marqueurs
+   invisibles, drag volé par la poignée — démontré par tests/zoom-tests.js le 16 juil 2026).
+   ::part(region) ne matche que la zone bleue : les marqueurs exposent part="marker …". */
+#waveform ::part(region) {
   border-top: 2px solid rgba(74, 144, 226, 0.6) !important;
   border-bottom: 2px solid rgba(74, 144, 226, 0.6) !important;
 }
-#waveform [part~="region-handle"] {
+#waveform ::part(region-handle) {
   z-index: 1 !important;
   border-color: rgba(255, 255, 255, 0.55) !important;
 }
-#waveform [part~="marker"] {
+#waveform ::part(marker) {
   z-index: 4 !important;
 }
 

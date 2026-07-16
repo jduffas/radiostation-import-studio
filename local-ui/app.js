@@ -588,7 +588,11 @@ function setupTrimWaveform(previewUrl, onReady) {
 
 function markerLabel(text, color) {
   const el = document.createElement('div')
-  el.style.cssText = `background:${color};color:#fff;padding:3px 10px;border-radius:4px;font-size:10px;font-weight:bold;white-space:nowrap;cursor:ew-resize;position:absolute;top:-22px;left:50%;transform:translateX(-50%);user-select:none;`
+  // top POSITIF (à l'intérieur de la piste) : le conteneur de scroll de wavesurfer est en
+  // overflow hidden — à top:-22px (au-dessus de la piste) l'étiquette était rognée, donc
+  // invisible ET impossible à saisir (elle est la vraie poignée de drag du marqueur).
+  // Même contrainte que le triangle du curseur, cf. commentaire ::part(cursor) de style.css.
+  el.style.cssText = `background:${color};color:#fff;padding:3px 10px;border-radius:4px;font-size:10px;font-weight:bold;white-space:nowrap;cursor:ew-resize;position:absolute;top:2px;left:50%;transform:translateX(-50%);user-select:none;`
   el.textContent = text
   return el
 }
