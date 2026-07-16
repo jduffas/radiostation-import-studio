@@ -70,6 +70,13 @@ async function api(path, opts = {}) {
   return json
 }
 
+// Année saisie librement (champ texte) → entier ou undefined. Sans ce garde, "abc" devenait
+// Number("abc") = NaN, sérialisé null dans le JSON d'import.
+function parseYear(value) {
+  const y = Number.parseInt(String(value ?? '').trim(), 10)
+  return Number.isFinite(y) && y > 0 ? y : undefined
+}
+
 function formatTime(seconds) {
   if (seconds == null || Number.isNaN(seconds) || seconds < 0) seconds = 0
   const m = Math.floor(seconds / 60)
@@ -362,7 +369,12 @@ async function startRip() {
     await api('/rip', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ track_numbers: selected.map(t => t.number) }),
+      body: JSON.stringify({
+        track_numbers: selected.map(t => t.number),
+        // Titres/artistes édités sur cet écran — sans ce champ, les modifications étaient
+        // silencieusement perdues (le rip ne connaissait que MusicBrainz).
+        tracks: selected.map(t => ({ number: t.number, title: t.title, artist: t.artist })),
+      }),
     })
     localView = 'boot'
     Object.keys(localCuePoints).forEach(k => delete localCuePoints[k])
@@ -529,6 +541,10 @@ function setupTrimWaveform(previewUrl, onReady) {
 
   wavesurfer.on('ready', () => {
     const dur = wavesurfer.getDuration()
+    // Affiche la durée totale dès le décodage — 'timeupdate' ne se déclenche qu'à la
+    // lecture, le compteur restait sinon à 00:00.000 / 00:00.000 tant qu'on ne jouait pas.
+    const $time = document.getElementById('time-display')
+    if ($time) $time.textContent = `${formatTime(0)} / ${formatTime(dur)}`
     const containerWidth = document.getElementById('waveform')?.clientWidth || 0
     // -1px de marge : évite qu'un arrondi ceil() interne à wavesurfer (scrollWidth vs
     // clientWidth) ne déclenche une barre de scroll fantôme dès le niveau ×1 (fit exact).
@@ -766,7 +782,7 @@ async function sendTrack(i) {
         title: r.title,
         artist_name: r.artist || 'Unknown',
         album: r.album || undefined,
-        year: r.year ? Number(r.year) : undefined,
+        year: parseYear(r.year),
         cue_in_seconds: cue.cueInSeconds,
         cue_out_seconds: cue.cueOutSeconds,
       }),
@@ -810,7 +826,7 @@ function renderFilesSelect() {
       <div class="card-header">Importer des fichiers locaux</div>
       <div class="card-body">
         <p class="hint">Sélectionnez ou glissez-déposez un ou plusieurs fichiers audio (mp3,
-        wav, flac, m4a…) — conversion, coupe du silence, cue points et analyse
+        wav, flac, m4a…) — coupe du silence, cue points et analyse
         (BPM/tonalité/loudness/energy) se font ici, avant l'envoi vers RadioStation.</p>
         <div id="files-dropzone" class="dropzone">
           <p>📁 Glissez-déposez vos fichiers ici<br>ou</p>
@@ -1096,7 +1112,7 @@ async function finishFilesUpload() {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        items: filesItems.map(it => ({ file_id: it.id, title: it.title, artist: it.artist, album: it.album, year: it.year })),
+        items: filesItems.map(it => ({ file_id: it.id, title: it.title, artist: it.artist, album: it.album, year: parseYear(it.year) ?? null })),
       }),
     })
     const fileIds = result.file_ids || []
@@ -1180,7 +1196,7 @@ async function sendFileItem(i) {
         title: it.title,
         artist_name: it.artist || 'Unknown',
         album: it.album || undefined,
-        year: it.year ? Number(it.year) : undefined,
+        year: parseYear(it.year),
         cue_in_seconds: it.cueInSeconds,
         cue_out_seconds: it.cueOutSeconds,
         bpm: it.bpm ?? undefined,

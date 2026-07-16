@@ -1210,7 +1210,7 @@ function detectSilenceCue(filePath) {
   });
 }
 
-async function doRip(backendUrl, authToken, trackNumbers = null) {
+async function doRip(backendUrl, authToken, trackNumbers = null, trackOverrides = null) {
   await quitMusicIfRunning();
 
   ripState = {
@@ -1263,12 +1263,15 @@ async function doRip(backendUrl, authToken, trackNumbers = null) {
       // Retrouver l'index original de la piste dans la TOC pour les métadonnées MB
       const origIdx = toc.tracks.findIndex(t => t.number === tnum);
       const tMeta = mbData?.tracks?.[origIdx >= 0 ? origIdx : i] || {};
+      // Édition utilisateur (écran de sélection local-ui) prioritaire sur MusicBrainz ;
+      // champ vidé volontairement → retombe sur MB puis sur le libellé générique.
+      const edited = trackOverrides?.get(tnum);
       files.push({
         name: fname,
         filePath: fpath,
         meta: {
-          title: tMeta.title || `Track ${tnum}`,
-          artist: tMeta.artist || mbData?.albumArtist || '',
+          title: edited?.title || tMeta.title || `Track ${tnum}`,
+          artist: edited?.artist || tMeta.artist || mbData?.albumArtist || '',
           album: tMeta.album || mbData?.albumTitle || '',
           year: tMeta.year || mbData?.year || null,
           track_number: tnum,
@@ -1493,7 +1496,21 @@ const server = http.createServer(async (req, res) => {
       const trackNumbers = Array.isArray(payload.track_numbers) && payload.track_numbers.length > 0
         ? payload.track_numbers.map(Number).filter(n => n > 0)
         : null;
-      doRip(backendUrl, authToken, trackNumbers).catch(e => console.error('[rip]', e));
+      // Titres/artistes édités par l'utilisateur sur l'écran de sélection (local-ui) —
+      // prioritaires sur MusicBrainz. Optionnel : le flux web n'envoie que track_numbers.
+      const trackOverrides = new Map();
+      if (Array.isArray(payload.tracks)) {
+        for (const t of payload.tracks) {
+          const num = Number(t?.number);
+          if (num > 0) {
+            trackOverrides.set(num, {
+              title: typeof t.title === 'string' ? t.title.trim() : '',
+              artist: typeof t.artist === 'string' ? t.artist.trim() : '',
+            });
+          }
+        }
+      }
+      doRip(backendUrl, authToken, trackNumbers, trackOverrides).catch(e => console.error('[rip]', e));
       jsonResp(res, 200, { status: 'started' });
     });
     return;
@@ -1700,23 +1717,33 @@ const server = http.createServer(async (req, res) => {
 
       const files = [];
       const metaArr = [];
-      for (const it of items) {
+      const sentItemIdx = []; // index (dans items) de chaque fichier réellement envoyé
+      for (const [idx, it] of items.entries()) {
         const entry = _localFiles.get(it.file_id);
-        if (!entry) continue;
+        if (!entry) continue; // ex. serveur redémarré entre l'upload local et l'envoi
         const targetPath = entry.convertedPath || entry.filePath;
         const ext = path.extname(targetPath);
         const safeName = (it.title || entry.originalName || 'track').replace(/[/\\]/g, '_');
         files.push({ name: `${safeName}${ext}`, filePath: targetPath });
         metaArr.push({ title: it.title, artist: it.artist, album: it.album, year: it.year });
+        sentItemIdx.push(idx);
       }
       if (!files.length) return jsonResp(res, 400, { error: 'Fichiers introuvables (session expirée ?)' });
 
       try {
         const upResult = await uploadToBackend(backendUrl, authToken, files, metaArr);
-        jsonResp(res, 200, {
-          file_ids: (upResult.files || []).map(f => f.file_id).filter(Boolean),
-          files_metadata: (upResult.files || []).map(f => f.metadata || {}),
+        // Réponse ALIGNÉE sur items (null aux positions skippées) : le client mappe
+        // file_ids[i] → items[i] par index — un item inconnu silencieusement omis
+        // décalerait tous les suivants (mauvais backendFileId → mauvais titre/cue au
+        // /import suivant). Bug réel trouvé par test le 16 juil 2026.
+        const upFiles = upResult.files || [];
+        const fileIds = new Array(items.length).fill(null);
+        const filesMetadata = new Array(items.length).fill(null);
+        sentItemIdx.forEach((itemIdx, k) => {
+          fileIds[itemIdx] = upFiles[k]?.file_id || null;
+          filesMetadata[itemIdx] = upFiles[k]?.metadata || {};
         });
+        jsonResp(res, 200, { file_ids: fileIds, files_metadata: filesMetadata });
         // Nettoyage seulement après succès confirmé : un accroc réseau lors de l'upload ne
         // doit pas supprimer les fichiers déjà convertis/coupés — même bug que finishRip()
         // (CD) évité ici. Sur erreur, _localFiles reste utilisable pour un nouvel essai via
