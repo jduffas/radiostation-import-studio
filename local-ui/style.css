@@ -373,3 +373,98 @@ code {
   font-size: 0.9rem;
   margin-top: 8px;
 }
+
+/* ── Éditeur unifié (v1.7) : onglets de mode + panneaux ─────────────────────── */
+
+.mode-tabs {
+  display: flex;
+  gap: 8px;
+  padding: 12px 24px 0;
+  flex-wrap: wrap;
+}
+
+.mode-tab {
+  background: #222;
+  color: var(--text-dim);
+  border: 1px solid #333;
+  border-radius: 6px 6px 0 0;
+  padding: 8px 14px;
+  cursor: pointer;
+  font-size: 0.9rem;
+}
+
+.mode-tab:hover { color: var(--text); }
+
+.mode-tab.active {
+  background: rgba(74, 144, 226, 0.15);
+  border-color: var(--blue);
+  color: var(--text);
+  font-weight: 600;
+}
+
+#mode-panel { padding: 0 24px 12px; }
+
+.mode-hint { padding: 12px 0 4px; }
+
+.panel-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 6px 0;
+}
+
+.panel-info {
+  color: var(--text-dim);
+  font-size: 0.9rem;
+}
+
+.cut-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+}
+
+.cut-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  background: rgba(244, 67, 54, 0.08);
+  border: 1px solid rgba(244, 67, 54, 0.35);
+  border-radius: 6px;
+  padding: 6px 12px;
+  font-size: 0.9rem;
+}
+
+.volume-row { gap: 24px; }
+
+.panel-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.9rem;
+  color: var(--text-dim);
+}
+
+.panel-field strong { color: var(--text); min-width: 64px; }
+
+.panel-field input[type="range"] { width: 180px; accent-color: var(--blue); }
+
+.panel-field input[type="number"] {
+  width: 64px;
+  background: #222;
+  color: var(--text);
+  border: 1px solid #333;
+  border-radius: 4px;
+  padding: 4px 6px;
+}
+
+.panel-field select {
+  background: #222;
+  color: var(--text);
+  border: 1px solid #333;
+  border-radius: 4px;
+  padding: 4px 6px;
+}

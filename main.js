@@ -90,7 +90,7 @@ let ripState = {
 
 // Fichiers rippés en attente de coupe/upload (statut 'trimming') — vidé par finishRip()
 // (POST /rip/confirm) ou en cas d'erreur. Séparé de ripState pour ne pas exposer filePath/meta
-// complets côté HTTP (ripState.pendingFiles n'expose que name/trackNumber/title).
+// complets côté HTTP (ripState.pendingFiles n'expose que name/trackNumber/title/vocalZones).
 let _pendingRip = null;
 
 function sleep(ms) {
@@ -1026,6 +1026,154 @@ function probeLocalDurationSeconds(filePath) {
 }
 
 // ============================================================
+// Édition audio complète (éditeur unifié v1.7) — montage (coupes internes) + volume +
+// fondus d'entrée/sortie à courbe paramétrable, appliqués en UNE passe ffmpeg.
+// Même sémantique de segments que l'Éditeur Audio Serveur du backend
+// (app/services/audio_editor.py::build_filter_complex) : atrim/asetpts par plage
+// conservée puis concat, avec en plus volume global et afade curve= en sortie.
+// ============================================================
+
+// Courbes afade autorisées (sous-ensemble stable de ffmpeg, toutes versions ≥ 3.x) :
+// tri = linéaire, qsin = sinus doux, esin = sinus accentué, exp = exponentiel, log = logarithmique.
+const AFADE_CURVES = new Set(['tri', 'qsin', 'esin', 'exp', 'log']);
+
+/**
+ * Normalise un payload d'édition (/trim, /files/trim) en plages conservées + effets.
+ * start_ms/end_ms : bornes globales (coupe tête/queue, comme avant) ; cuts : passages
+ * INTERNES à supprimer [{start_ms,end_ms}] ; volume_db ; fade_in_ms/fade_out_ms +
+ * fade_in_curve/fade_out_curve. Toutes les positions sont ABSOLUES dans le fichier courant.
+ *
+ * @returns {{keepRanges:Array<{startMs:number,endMs:number}>, volumeDb:number,
+ *            fadeInMs:number, fadeInCurve:string, fadeOutMs:number, fadeOutCurve:string,
+ *            needsFull:boolean, keptDurationMs:number}}
+ */
+function normalizeEditPayload(payload, totalDurationMs) {
+  const startMs = Math.max(0, Number(payload.start_ms) || 0);
+  const endMs = payload.end_ms != null
+    ? Math.min(Number(payload.end_ms), totalDurationMs)
+    : totalDurationMs;
+  if (!(endMs > startMs)) throw new Error('Bornes de coupe invalides');
+
+  // Coupes internes : rognées aux bornes globales, triées, fusionnées si chevauchement.
+  const rawCuts = Array.isArray(payload.cuts) ? payload.cuts : [];
+  const cuts = [];
+  for (const c of rawCuts) {
+    const cs = Math.max(startMs, Number(c?.start_ms) || 0);
+    const ce = Math.min(endMs, Number(c?.end_ms) || 0);
+    if (ce - cs >= 10) cuts.push({ startMs: cs, endMs: ce });
+  }
+  cuts.sort((a, b) => a.startMs - b.startMs);
+  const merged = [];
+  for (const c of cuts) {
+    const last = merged[merged.length - 1];
+    if (last && c.startMs <= last.endMs) last.endMs = Math.max(last.endMs, c.endMs);
+    else merged.push({ ...c });
+  }
+
+  // Plages conservées = complément des coupes dans [startMs, endMs].
+  const keepRanges = [];
+  let cursor = startMs;
+  for (const c of merged) {
+    if (c.startMs - cursor >= 10) keepRanges.push({ startMs: cursor, endMs: c.startMs });
+    cursor = Math.max(cursor, c.endMs);
+  }
+  if (endMs - cursor >= 10) keepRanges.push({ startMs: cursor, endMs });
+  if (!keepRanges.length) throw new Error('Aucun passage conservé après montage');
+
+  const keptDurationMs = keepRanges.reduce((s, r) => s + (r.endMs - r.startMs), 0);
+
+  const volumeDb = Math.max(-24, Math.min(24, Number(payload.volume_db) || 0));
+  const clampFade = (v) => Math.max(0, Math.min(30000, Math.round(Number(v) || 0)));
+  const fadeInMs = clampFade(payload.fade_in_ms);
+  const fadeOutMs = clampFade(payload.fade_out_ms);
+  const curve = (v) => (AFADE_CURVES.has(String(v)) ? String(v) : 'tri');
+
+  return {
+    keepRanges,
+    volumeDb,
+    fadeInMs,
+    fadeInCurve: curve(payload.fade_in_curve),
+    fadeOutMs,
+    fadeOutCurve: curve(payload.fade_out_curve),
+    keptDurationMs,
+    // false = simple coupe tête/queue → trimWavFile (chemin historique) suffit.
+    needsFull: merged.length > 0 || Math.abs(volumeDb) > 0.01 || fadeInMs > 0 || fadeOutMs > 0,
+  };
+}
+
+/**
+ * true si le payload demande plus qu'une coupe tête/queue (montage interne, volume ou
+ * fondu) — décidé AVANT tout ffprobe : un échec de sonde ne doit jamais faire retomber
+ * silencieusement sur trimWavFile en ignorant les effets demandés.
+ */
+function editNeedsFullPass(payload) {
+  return (Array.isArray(payload.cuts) && payload.cuts.length > 0)
+    || Math.abs(Number(payload.volume_db) || 0) > 0.01
+    || (Number(payload.fade_in_ms) || 0) > 0
+    || (Number(payload.fade_out_ms) || 0) > 0;
+}
+
+/** Construit la chaîne -filter_complex (sortie [out]) pour une édition normalisée. */
+function buildEditFilter(edit) {
+  const n = edit.keepRanges.length;
+  const parts = [];
+
+  const post = [];
+  if (Math.abs(edit.volumeDb) > 0.01) post.push(`volume=${edit.volumeDb.toFixed(2)}dB`);
+  if (edit.fadeInMs > 0) {
+    post.push(`afade=t=in:st=0:d=${(edit.fadeInMs / 1000).toFixed(3)}:curve=${edit.fadeInCurve}`);
+  }
+  if (edit.fadeOutMs > 0) {
+    const st = Math.max(0, (edit.keptDurationMs - edit.fadeOutMs) / 1000);
+    post.push(`afade=t=out:st=${st.toFixed(3)}:d=${(edit.fadeOutMs / 1000).toFixed(3)}:curve=${edit.fadeOutCurve}`);
+  }
+
+  const segChain = (r) =>
+    `atrim=start=${(r.startMs / 1000).toFixed(3)}:end=${(r.endMs / 1000).toFixed(3)},asetpts=PTS-STARTPTS`;
+
+  if (n === 1) {
+    // Pas de concat=n=1 (échoue sur certaines versions ffmpeg — même garde que le backend).
+    const chain = [segChain(edit.keepRanges[0]), ...post].join(',');
+    return `[0:a]${chain}[out]`;
+  }
+
+  const splitLabels = edit.keepRanges.map((_, i) => `[in${i}]`).join('');
+  parts.push(`[0:a]asplit=${n}${splitLabels}`);
+  edit.keepRanges.forEach((r, i) => parts.push(`[in${i}]${segChain(r)}[seg${i}]`));
+  const concatInputs = edit.keepRanges.map((_, i) => `[seg${i}]`).join('');
+  if (post.length) {
+    parts.push(`${concatInputs}concat=n=${n}:v=0:a=1[cat]`);
+    parts.push(`[cat]${post.join(',')}[out]`);
+  } else {
+    parts.push(`${concatInputs}concat=n=${n}:v=0:a=1[out]`);
+  }
+  return parts.join(';');
+}
+
+/**
+ * Applique une édition complète (montage/volume/fondus) sur place, comme trimWavFile :
+ * fichier temporaire avec la même extension (le muxer de sortie ffmpeg en dépend) puis
+ * remplacement atomique. Ré-encode selon l'extension (WAV rippés → pcm par défaut ffmpeg).
+ */
+async function applyAudioEdit(filePath, payload) {
+  const durationSeconds = await probeLocalDurationSeconds(filePath);
+  if (!durationSeconds) throw new Error('Durée du fichier indéterminable (ffprobe)');
+  const edit = normalizeEditPayload(payload, Math.round(durationSeconds * 1000));
+  const filter = buildEditFilter(edit);
+
+  const ext = path.extname(filePath);
+  const base = ext ? filePath.slice(0, -ext.length) : filePath;
+  const tmpOut = `${base}.edit-${Date.now()}${ext}`;
+  try {
+    await runFfmpeg(['-y', '-i', filePath, '-filter_complex', filter, '-map', '[out]', tmpOut]);
+    fs.renameSync(tmpOut, filePath);
+  } catch (e) {
+    try { fs.unlinkSync(tmpOut); } catch { /* rien à nettoyer */ }
+    throw e;
+  }
+}
+
+// ============================================================
 // Import de fichiers locaux hors CD (Phase 4) — conversion, coupe, détection de cue
 // points, analyse loudness/energy/start-end type. BPM et tonalité restent calculés
 // côté webview (aubiojs, local-ui/app.js) : aucun round-trip HTTP pour ces deux-là.
@@ -1300,6 +1448,7 @@ async function doRip(backendUrl, authToken, trackNumbers = null, trackOverrides 
         ripState.progress = 70 + Math.round((i / files.length) * 15); // 70→85 %
         console.log(`[analyzeVocal] Analyse piste ${i + 1}/${files.length} : ${files[i].filePath}`);
         const zones = await analyzeVocalZones(files[i].filePath, null);
+        files[i]._vocalAnalyzed = true; // évite une ré-analyse via /rip/analyze-vocal si 0 zone
         if (zones.length > 0) {
           files[i].meta.vocal_zones = zones;
           console.log(`[analyzeVocal] Piste ${i + 1} : ${zones.length} zone(s) détectée(s), meilleure = ${zones[0].duration_ms}ms`);
@@ -1319,6 +1468,9 @@ async function doRip(backendUrl, authToken, trackNumbers = null, trackOverrides 
       name: f.name,
       trackNumber: f.meta.track_number,
       title: f.meta.title,
+      // Zones sans voix détectées au rip (si vocal_analysis_enabled) — pré-remplissent le
+      // mode « Jingle intérieur » de l'éditeur sans round-trip /rip/analyze-vocal.
+      vocalZones: f.meta.vocal_zones || null,
     }));
     _pendingRip = { backendUrl, authToken, files, rippedPaths };
     return;
@@ -1543,12 +1695,47 @@ const server = http.createServer(async (req, res) => {
       const file = _pendingRip?.files.find(f => f.meta.track_number === trackNumber);
       if (!file) return jsonResp(res, 404, { error: 'Piste inconnue' });
       try {
-        await trimWavFile(file.filePath, startMs, endMs);
+        // Montage/volume/fondus (éditeur unifié v1.7) → une passe filter_complex ;
+        // simple coupe tête/queue → chemin historique trimWavFile (plus léger).
+        if (editNeedsFullPass(payload)) {
+          await applyAudioEdit(file.filePath, payload);
+        } else {
+          await trimWavFile(file.filePath, startMs, endMs);
+        }
+        // Le fichier vient d'être réécrit : les zones vocales détectées au rip sont
+        // exprimées dans l'ancienne timeline — on les retire pour que l'auto-sélection
+        // backend ne place pas la zone jingle au mauvais endroit (l'UI envoie de toute
+        // façon la zone explicite remappée via /import, cf. overlay_zone_* côté backend).
+        delete file.meta.vocal_zones;
         const durationSeconds = await probeLocalDurationSeconds(file.filePath);
         jsonResp(res, 200, { status: 'trimmed', track_number: trackNumber, duration_seconds: durationSeconds });
       } catch (e) {
         jsonResp(res, 500, { error: e.message });
       }
+    });
+    return;
+  }
+
+  // ── Analyse vocale à la demande pendant 'trimming' (mode « Jingle intérieur ») ──
+  // Utile quand le réglage vocal_analysis_enabled était désactivé au moment du rip :
+  // l'éditeur peut quand même demander les zones sans voix d'une piste déjà rippée.
+  if (req.method === 'POST' && pathname === '/rip/analyze-vocal') {
+    if (ripState.status !== 'trimming' || !_pendingRip) {
+      return jsonResp(res, 409, { error: 'Aucune piste en attente de coupe' });
+    }
+    let body = '';
+    req.on('data', c => { body += c; });
+    req.on('end', async () => {
+      let payload = {};
+      try { payload = JSON.parse(body); } catch { /* ignore */ }
+      const file = _pendingRip?.files.find(f => f.meta.track_number === Number(payload.track_number));
+      if (!file) return jsonResp(res, 404, { error: 'Piste inconnue' });
+      if (!file.meta.vocal_zones && !file._vocalAnalyzed) {
+        const zones = await analyzeVocalZones(file.filePath, null);
+        file._vocalAnalyzed = true;
+        if (zones.length > 0) file.meta.vocal_zones = zones;
+      }
+      jsonResp(res, 200, { track_number: file.meta.track_number, zones: file.meta.vocal_zones || [] });
     });
     return;
   }
@@ -1651,12 +1838,39 @@ const server = http.createServer(async (req, res) => {
       const endMs = payload.end_ms != null ? Number(payload.end_ms) : null;
       const targetPath = entry.convertedPath || entry.filePath;
       try {
-        await trimWavFile(targetPath, startMs, endMs);
+        // Même aiguillage que /trim (CD) : montage/volume/fondus → filter_complex.
+        if (editNeedsFullPass(payload)) {
+          await applyAudioEdit(targetPath, payload);
+        } else {
+          await trimWavFile(targetPath, startMs, endMs);
+        }
+        entry.vocalZones = undefined; // timeline modifiée → zones vocales caduques
         const durationSeconds = await probeLocalDurationSeconds(targetPath);
         jsonResp(res, 200, { status: 'trimmed', file_id: payload.file_id, duration_seconds: durationSeconds });
       } catch (e) {
         jsonResp(res, 500, { error: e.message });
       }
+    });
+    return;
+  }
+
+  // ── Analyse vocale d'un fichier local (mode « Jingle intérieur » de l'éditeur) ──
+  // Pendant CD, l'analyse tourne au rip (réglage vocal_analysis_enabled) ; pour les
+  // fichiers locaux elle est faite à la demande, au premier passage dans le mode jingle.
+  if (req.method === 'POST' && pathname === '/files/analyze-vocal') {
+    let body = '';
+    req.on('data', c => { body += c; });
+    req.on('end', async () => {
+      let payload = {};
+      try { payload = JSON.parse(body); } catch { /* ignore */ }
+      const entry = _localFiles.get(payload.file_id);
+      if (!entry) return jsonResp(res, 404, { error: 'Fichier inconnu' });
+      if (entry.vocalZones === undefined) {
+        const targetPath = entry.convertedPath || entry.filePath;
+        const durationSeconds = await probeLocalDurationSeconds(targetPath);
+        entry.vocalZones = await analyzeVocalZones(targetPath, durationSeconds ? durationSeconds * 1000 : null);
+      }
+      jsonResp(res, 200, { file_id: payload.file_id, zones: entry.vocalZones || [] });
     });
     return;
   }

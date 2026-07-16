@@ -13,7 +13,8 @@ if (!src.includes("server.listen(PORT, '127.0.0.1'")) throw new Error('patch poi
 src = src.replace("server.listen(PORT, '127.0.0.1'", "if (process.env.RS_TEST_LISTEN) server.listen(PORT, '127.0.0.1'");
 src += `\nmodule.exports = { parseToc, computeMbDiscId, isVersionNewer, parseFilenameTitleArtist,
   _parseAstats, _computeVocalZones, isAllowedOrigin, parseMultipart, trimWavFile, msfToLba,
-  detectEnergyFromMean, probeLocalDurationSeconds };\n`;
+  detectEnergyFromMean, probeLocalDurationSeconds, normalizeEditPayload, buildEditFilter,
+  editNeedsFullPass, applyAudioEdit };\n`;
 fs.writeFileSync(OUT, src);
 
 const M = require(OUT);
@@ -136,6 +137,56 @@ TOTAL   46442 [10:19.17]    (audio only)
 
   // ---- msfToLba ----
   check('msfToLba: 03:22.63', M.msfToLba(3, 22, 63) === 15213);
+
+  // ---- Éditeur unifié v1.7 : normalizeEditPayload / buildEditFilter / editNeedsFullPass ----
+  check('editNeedsFullPass: trim simple → false', M.editNeedsFullPass({ start_ms: 1500, end_ms: 6500 }) === false);
+  check('editNeedsFullPass: cuts/volume/fades → true',
+    M.editNeedsFullPass({ cuts: [{ start_ms: 1, end_ms: 2 }] }) && M.editNeedsFullPass({ volume_db: -3 })
+    && M.editNeedsFullPass({ fade_in_ms: 500 }) && M.editNeedsFullPass({ fade_out_ms: 500 }));
+
+  // Complément des coupes : [1000..9000] moins [2000..3000]+[2500..4000] (chevauchement fusionné)
+  const ne = M.normalizeEditPayload({
+    start_ms: 1000, end_ms: 9000,
+    cuts: [{ start_ms: 2500, end_ms: 4000 }, { start_ms: 2000, end_ms: 3000 }],
+    volume_db: -50, fade_in_ms: 500, fade_in_curve: 'qsin', fade_out_ms: 999999, fade_out_curve: 'hackerz',
+  }, 10000);
+  check('normalize: plages conservées = [1000-2000, 4000-9000]',
+    ne.keepRanges.length === 2 && ne.keepRanges[0].startMs === 1000 && ne.keepRanges[0].endMs === 2000
+    && ne.keepRanges[1].startMs === 4000 && ne.keepRanges[1].endMs === 9000, JSON.stringify(ne.keepRanges));
+  check('normalize: durée conservée 6000ms', ne.keptDurationMs === 6000, String(ne.keptDurationMs));
+  check('normalize: volume clampé à -24dB', ne.volumeDb === -24, String(ne.volumeDb));
+  check('normalize: fade_out clampé 30s + courbe inconnue → tri',
+    ne.fadeOutMs === 30000 && ne.fadeOutCurve === 'tri' && ne.fadeInCurve === 'qsin', JSON.stringify(ne));
+  check('normalize: needsFull true', ne.needsFull === true);
+  check('normalize: end_ms null → durée totale',
+    M.normalizeEditPayload({ start_ms: 0 }, 10000).keepRanges[0].endMs === 10000);
+  check('normalize: tout coupé → erreur', (() => {
+    try { M.normalizeEditPayload({ cuts: [{ start_ms: 0, end_ms: 10000 }] }, 10000); return false; }
+    catch { return true; }
+  })());
+
+  const f1 = M.buildEditFilter(M.normalizeEditPayload({ start_ms: 1500, end_ms: 6500 }, 10000));
+  check('buildEditFilter: plage unique sans effet → atrim direct vers [out]',
+    f1 === '[0:a]atrim=start=1.500:end=6.500,asetpts=PTS-STARTPTS[out]', f1);
+  const f2 = M.buildEditFilter(ne);
+  check('buildEditFilter: multi-plages → asplit + concat',
+    f2.includes('asplit=2[in0][in1]') && f2.includes('concat=n=2:v=0:a=1[cat]'), f2);
+  check('buildEditFilter: volume + afades avec courbes sur [cat]',
+    f2.includes('[cat]volume=-24.00dB') && f2.includes('afade=t=in:st=0:d=0.500:curve=qsin')
+    && f2.includes('afade=t=out:st=0.000:d=30.000:curve=tri') && f2.endsWith('[out]'), f2);
+  const f3 = M.buildEditFilter(M.normalizeEditPayload({ volume_db: 6, fade_out_ms: 2000, fade_out_curve: 'log' }, 10000));
+  check('buildEditFilter: plage unique + effets enchaînés',
+    f3.includes('volume=6.00dB') && f3.includes('afade=t=out:st=8.000:d=2.000:curve=log'), f3);
+
+  // applyAudioEdit ffmpeg réel : 10s, coupe interne 2s→4s + fondus → 8s
+  const tmpWav3 = path.join(__dirname, '.tmp', 'edittest.wav');
+  fs.copyFileSync(path.join(FIX, 'Artist One - Nice Song.wav'), tmpWav3);
+  await M.applyAudioEdit(tmpWav3, {
+    cuts: [{ start_ms: 2000, end_ms: 4000 }],
+    volume_db: -6, fade_in_ms: 500, fade_out_ms: 500, fade_in_curve: 'qsin', fade_out_curve: 'exp',
+  });
+  const dur3 = await M.probeLocalDurationSeconds(tmpWav3);
+  check('applyAudioEdit: coupe interne 2s sur 10s = 8s', dur3 !== null && Math.abs(dur3 - 8.0) < 0.1, String(dur3));
 
   console.log(`\nUNIT: ${pass} ok, ${fail} échec(s)`);
   if (failures.length) console.log('Échecs: ' + failures.join(' | '));

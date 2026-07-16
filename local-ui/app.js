@@ -438,6 +438,7 @@ function renderTrimming() {
       <div class="card-header">
         Piste ${trimIndex + 1} / ${pending.length} — ${escapeHtml(track.title)}
       </div>
+      ${editorModeTabsHtml()}
       <div class="waveform-container"><div id="waveform"></div></div>
       <div class="controls-bar">
         <div class="playback-group">
@@ -464,27 +465,41 @@ function renderTrimming() {
           <button class="btn-preview" id="btn-preview-end">🔊 Écouter</button>
         </div>
       </div>
-      <p class="hint" style="padding:12px 24px;">
-        <strong>Zone bleue</strong> (contour bleu, toute la piste par défaut) : glissez ses
-        bords pour couper le silence/déchet — coupe définitive, avant l'envoi.
-        <strong>DÉBUT</strong> (cyan) / <strong>TRANSITION</strong>
-        (rouge) : cue points, ni l'un ni l'autre n'est obligatoire, affinables après import.
-        Zoomez (➕/➖) pour les placer avec précision, défilement horizontal une fois zoomé.
-      </p>
+      <div id="mode-panel"></div>
       <div class="actions">
         <button class="btn-secondary" id="btn-skip-track">Passer (garder tel quel)</button>
         <button class="btn" id="btn-confirm-track">Valider et continuer</button>
       </div>
     </div>`
 
+  editorContext = { flow: 'cd', trackNumber: track.trackNumber, initialVocalZones: track.vocalZones || null }
   setupTrimWaveform(`/rip-preview/${track.trackNumber}`)
+  wireEditorModeTabs()
+  renderModePanel()
 
-  document.getElementById('btn-skip-track').onclick = () => advanceTrimming(null, null, 0, 0)
+  document.getElementById('btn-skip-track').onclick = () => advanceTrimming(null)
   document.getElementById('btn-confirm-track').onclick = onConfirmTrack
   document.getElementById('btn-reset').onclick = () => trimMarkers?.resetToFull()
 }
 
-let trimMarkers = null // { trimStart, trimEnd, cueInPos, cueOutPos, keepRegion, cueInRegion, cueOutRegion }
+let trimMarkers = null // { trimStart, trimEnd, cueInPos, cueOutPos, keepRegion, cueInRegion, cueOutRegion, mode, overlay*, cuts, volumeDb, fade* }
+
+// Contexte du fichier/piste en cours d'édition — permet aux briques partagées de l'éditeur
+// (analyse vocale à la demande, panneaux de mode) de savoir quel endpoint appeler.
+let editorContext = null // { flow: 'cd'|'files', trackNumber?, fileId?, initialVocalZones }
+
+// Couleurs des nouvelles régions de l'éditeur unifié (v1.7)
+const OVERLAY_COLOR = 'rgba(76,175,80,0.30)' // zone « jingle intérieur » (vert)
+const CUT_COLOR = 'rgba(244,67,54,0.30)' // passages supprimés au montage (rouge)
+
+// Courbes de fondu proposées (whitelist AFADE_CURVES côté main.js — garder synchronisé)
+const FADE_CURVES = [
+  ['tri', 'Linéaire'],
+  ['qsin', 'Doux (sinus)'],
+  ['esin', 'Sinus accentué'],
+  ['exp', 'Exponentiel'],
+  ['log', 'Logarithmique'],
+]
 // fitPxPerSec = pixels/seconde qui remplit exactement le conteneur sans scroll (niveau ×1) ;
 // recalculé à chaque 'ready' (largeur dispo + durée changent à chaque piste/fichier). Les
 // régions WaveSurfer sont positionnées en % de la durée totale (cf. regions.esm.js
@@ -526,6 +541,16 @@ function setupTrimWaveform(previewUrl, onReady) {
   trimMarkers = {
     trimStart: 0, trimEnd: 0, cueInPos: 0, cueOutPos: 0,
     keepRegion: null, cueInRegion: null, cueOutRegion: null, updating: false,
+    // Éditeur unifié (v1.7) : mode courant + zone jingle intérieur + montage + volume/fondus
+    mode: 'cue', // 'cue' | 'jingle' | 'cut' | 'volume'
+    regionsPlugin: regions,
+    overlayStart: null, overlayEnd: null, overlayRegion: null,
+    overlayTouched: false, // true dès que l'utilisateur a déplacé/posé/retiré la zone lui-même
+    vocalZones: editorContext?.initialVocalZones || null, // null = pas encore analysé
+    vocalLoading: false,
+    cuts: [], cutSeq: 0, // [{id, region}]
+    disableDragSel: null,
+    volumeDb: 0, fadeInMs: 0, fadeInCurve: 'tri', fadeOutMs: 0, fadeOutCurve: 'tri',
     // Bug réel trouvé et corrigé (Phase 4) : le bouton "Tout réinitialiser" appelait déjà
     // trimMarkers?.resetToFull() sans que la méthode existe jamais — clic sans effet
     // (silencieux, aucune région ne bougeait). Généralisé en même temps que cette fonction.
@@ -535,9 +560,26 @@ function setupTrimWaveform(previewUrl, onReady) {
       this.keepRegion?.setOptions({ start: 0, end: dur })
       this.cueInRegion?.setOptions({ start: 0 })
       this.cueOutRegion?.setOptions({ start: dur })
+      this.cuts.forEach(c => c.region.remove())
+      this.cuts = []
+      if (this.overlayRegion) { this.overlayRegion.remove(); this.overlayRegion = null }
+      this.overlayStart = null; this.overlayEnd = null; this.overlayTouched = false
+      this.volumeDb = 0; this.fadeInMs = 0; this.fadeOutMs = 0
+      this.fadeInCurve = 'tri'; this.fadeOutCurve = 'tri'
+      wavesurfer?.setVolume(1)
+      renderModePanel()
       updateSummary()
     },
   }
+
+  // Régions créées à la souris en mode montage (enableDragSelection) : adoptées comme
+  // coupes après clamp — les régions connues (trim-keep/cue/overlay) passent aussi par cet
+  // événement à leur création, d'où le garde sur l'id.
+  regions.on('region-created', (region) => {
+    if (['trim-keep', 'cue-in', 'cue-out', 'overlay-zone'].includes(region.id)) return
+    if (String(region.id).startsWith('cut-')) return
+    adoptCutRegion(region)
+  })
 
   wavesurfer.on('ready', () => {
     const dur = wavesurfer.getDuration()
@@ -557,6 +599,9 @@ function setupTrimWaveform(previewUrl, onReady) {
     trimMarkers.keepRegion = regions.addRegion({ id: 'trim-keep', start: 0, end: dur, color: 'rgba(74,144,226,0.15)', drag: true, resize: true })
     trimMarkers.cueInRegion = regions.addRegion({ id: 'cue-in', start: 0, color: 'rgba(33,150,243,0.9)', drag: true, resize: false, content: markerLabel('DÉBUT', '#2196f3') })
     trimMarkers.cueOutRegion = regions.addRegion({ id: 'cue-out', start: dur, color: 'rgba(244,67,54,0.9)', drag: true, resize: false, content: markerLabel('TRANSITION', '#f44336') })
+    // Applique l'interactivité du mode courant (les régions viennent seulement d'exister) —
+    // en mode 'cue' par défaut, comportement identique à avant l'éditeur unifié.
+    setEditorMode(trimMarkers.mode)
     updateSummary()
     onReady?.()
   })
@@ -640,6 +685,27 @@ function onRegionMoved(region) {
       region.setOptions({ start: clamped })
       trimMarkers.updating = false
     }
+  } else if (region.id === 'overlay-zone') {
+    const start = Math.max(trimMarkers.trimStart, Math.min(region.start, trimMarkers.trimEnd - 0.2))
+    const end = Math.min(trimMarkers.trimEnd, Math.max(region.end, start + 0.2))
+    trimMarkers.overlayStart = start
+    trimMarkers.overlayEnd = end
+    trimMarkers.overlayTouched = true
+    if (Math.abs(region.start - start) > 0.01 || Math.abs(region.end - end) > 0.01) {
+      trimMarkers.updating = true
+      region.setOptions({ start, end })
+      trimMarkers.updating = false
+    }
+    updateOverlayInfo()
+  } else if (String(region.id).startsWith('cut-')) {
+    const start = Math.max(trimMarkers.trimStart, Math.min(region.start, trimMarkers.trimEnd - 0.1))
+    const end = Math.min(trimMarkers.trimEnd, Math.max(region.end, start + 0.1))
+    if (Math.abs(region.start - start) > 0.01 || Math.abs(region.end - end) > 0.01) {
+      trimMarkers.updating = true
+      region.setOptions({ start, end })
+      trimMarkers.updating = false
+    }
+    updateCutList()
   }
   updateSummary()
 }
@@ -659,7 +725,9 @@ function clampCueMarkers() {
 
 function updateSummary() {
   if (!trimMarkers) return
-  const kept = Math.max(0, trimMarkers.trimEnd - trimMarkers.trimStart)
+  // « Zone conservée » = durée du fichier final : coupe tête/queue MOINS les coupes de montage.
+  const totalCut = sortedCuts().reduce((s, c) => s + (c.end - c.start), 0)
+  const kept = Math.max(0, trimMarkers.trimEnd - trimMarkers.trimStart - totalCut)
   const cueIn = Math.max(0, trimMarkers.cueInPos - trimMarkers.trimStart)
   const cueOut = Math.max(0, trimMarkers.trimEnd - trimMarkers.cueOutPos)
   const $kept = document.getElementById('sum-kept')
@@ -670,34 +738,447 @@ function updateSummary() {
   if ($out) $out.textContent = formatTime(cueOut)
 }
 
-async function onConfirmTrack() {
-  const pending = currentRipState.pendingFiles
-  const track = pending[trimIndex]
-  const hasTrim = trimMarkers.trimStart > 0.05 || trimMarkers.trimEnd < wavesurfer.getDuration() - 0.05
-  const startMs = Math.round(trimMarkers.trimStart * 1000)
-  const endMs = hasTrim ? Math.round(trimMarkers.trimEnd * 1000) : null
-  const cueInSeconds = Math.max(0, trimMarkers.cueInPos - trimMarkers.trimStart)
-  const cueOutSeconds = Math.max(0, trimMarkers.trimEnd - trimMarkers.cueOutPos)
-  await advanceTrimming(startMs, endMs, cueInSeconds, cueOutSeconds)
+// ══ Éditeur unifié (v1.7) : modes, zone jingle intérieur, montage, volume & fondus ══════
+
+function editorModeTabsHtml() {
+  return `
+    <div class="mode-tabs" id="mode-tabs">
+      <button class="mode-tab active" data-mode="cue">🎯 Cue points</button>
+      <button class="mode-tab" data-mode="jingle">📢 Jingle intérieur</button>
+      <button class="mode-tab" data-mode="cut">✂️ Montage</button>
+      <button class="mode-tab" data-mode="volume">🔊 Volume &amp; fondus</button>
+    </div>`
 }
 
-async function advanceTrimming(startMs, endMs, cueInSeconds, cueOutSeconds) {
+function wireEditorModeTabs() {
+  document.querySelectorAll('.mode-tab').forEach(el => {
+    el.onclick = () => setEditorMode(el.dataset.mode)
+  })
+}
+
+// Change le mode actif SANS re-render global : la waveform (et ses régions) doit survivre
+// au changement de mode. Seuls le panneau bas et l'interactivité des régions changent —
+// les régions des autres modes restent visibles mais ni saisissables ni cliquables
+// (pointerEvents:'none', pour que la sélection à la souris du mode montage et le clic-seek
+// passent au travers ; le drag d'une région préventDefault les pointermove du document,
+// ce qui bloquerait enableDragSelection même drag désactivé).
+function setEditorMode(mode) {
+  if (!trimMarkers) return
+  trimMarkers.mode = mode
+  document.querySelectorAll('.mode-tab').forEach(el => el.classList.toggle('active', el.dataset.mode === mode))
+
+  const setActive = (region, active, withResize) => {
+    if (!region) return
+    const opts = { drag: active }
+    if (withResize) opts.resize = active
+    region.setOptions(opts)
+    if (region.element) region.element.style.pointerEvents = active ? 'all' : 'none'
+  }
+  setActive(trimMarkers.keepRegion, mode === 'cue', true)
+  setActive(trimMarkers.cueInRegion, mode === 'cue', false)
+  setActive(trimMarkers.cueOutRegion, mode === 'cue', false)
+  setActive(trimMarkers.overlayRegion, mode === 'jingle', true)
+  trimMarkers.cuts.forEach(c => setActive(c.region, mode === 'cut', true))
+
+  if (trimMarkers.disableDragSel) { trimMarkers.disableDragSel(); trimMarkers.disableDragSel = null }
+  if (mode === 'cut' && trimMarkers.regionsPlugin) {
+    trimMarkers.disableDragSel = trimMarkers.regionsPlugin.enableDragSelection({ color: CUT_COLOR })
+  }
+
+  if (mode === 'jingle') ensureVocalZones()
+  renderModePanel()
+}
+
+function renderModePanel() {
+  const $panel = document.getElementById('mode-panel')
+  if (!$panel || !trimMarkers) return
+  const mode = trimMarkers.mode
+
+  if (mode === 'cue') {
+    $panel.innerHTML = `
+      <p class="hint mode-hint">
+        <strong>Zone bleue</strong> (toute la piste par défaut) : glissez ses bords pour couper
+        le silence/déchet en tête/queue — coupe définitive, avant l'envoi.
+        <strong>DÉBUT</strong> (cyan) / <strong>TRANSITION</strong> (rouge) : cue points, ni
+        l'un ni l'autre n'est obligatoire, affinables après import.
+        ${editorContext?.flow === 'files' ? '« Détecter automatiquement » propose des positions à partir des silences détectés. ' : ''}
+        Zoomez (➕/➖) pour les placer avec précision, défilement horizontal une fois zoomé.
+      </p>`
+    return
+  }
+
+  if (mode === 'jingle') {
+    const hasZone = trimMarkers.overlayStart != null
+    const zones = trimMarkers.vocalZones
+    const detectInfo = trimMarkers.vocalLoading
+      ? '⏳ Analyse de la voix en cours…'
+      : zones === null
+        ? ''
+        : zones.length
+          ? `${zones.length} passage(s) sans voix détecté(s).`
+          : 'Aucun passage sans voix détecté sur cette piste.'
+    $panel.innerHTML = `
+      <p class="hint mode-hint">
+        <strong>Zone verte (JINGLE)</strong> : passage sans voix où la radio pourra superposer
+        un jingle pendant la diffusion (« jingle intérieur »). Glissez la zone ou ses bords.
+        Enregistrée à l'import, modifiable ensuite sur le site.
+      </p>
+      <div class="panel-row">
+        <button class="btn-ctrl" id="btn-overlay-suggest" ${trimMarkers.vocalLoading || !(zones && zones.length) ? 'disabled' : ''}>📢 Proposer depuis la voix détectée</button>
+        <button class="btn-ctrl" id="btn-overlay-add" ${hasZone ? 'disabled' : ''} title="Pose une zone de 8 s à la position de lecture">➕ Poser une zone</button>
+        <button class="btn-ctrl" id="btn-overlay-remove" ${hasZone ? '' : 'disabled'}>Supprimer la zone</button>
+        <span class="panel-info" id="overlay-info"></span>
+        <span class="panel-info">${detectInfo}</span>
+      </div>`
+    updateOverlayInfo()
+    const $suggest = document.getElementById('btn-overlay-suggest')
+    if ($suggest) $suggest.onclick = () => applyBestVocalZone(true)
+    const $add = document.getElementById('btn-overlay-add')
+    if ($add) $add.onclick = addManualOverlayZone
+    const $remove = document.getElementById('btn-overlay-remove')
+    if ($remove) $remove.onclick = removeOverlayZone
+    return
+  }
+
+  if (mode === 'cut') {
+    $panel.innerHTML = `
+      <p class="hint mode-hint">
+        <strong>Montage</strong> : cliquez-glissez sur la forme d'onde pour marquer un passage
+        à supprimer (zone rouge). Les passages marqués sont retirés définitivement du fichier
+        envoyé — cue points et zone jingle sont recalés automatiquement.
+      </p>
+      <div class="panel-row"><div class="cut-list" id="cut-list"></div></div>`
+    updateCutList()
+    return
+  }
+
+  // mode === 'volume'
+  const curveOptions = (selected) => FADE_CURVES
+    .map(([v, label]) => `<option value="${v}" ${v === selected ? 'selected' : ''}>${label}</option>`).join('')
+  const volLabel = (db) => `${db > 0 ? '+' : ''}${db.toFixed(1)} dB`
+  $panel.innerHTML = `
+    <p class="hint mode-hint">
+      <strong>Volume &amp; fondus</strong> : appliqués définitivement au fichier envoyé.
+      Le volume s'entend à la lecture ici (aperçu limité aux baisses) ; les fondus ne sont
+      pas prévisualisés — choisissez la durée et le type de courbe.
+    </p>
+    <div class="panel-row volume-row">
+      <label class="panel-field">Volume
+        <input type="range" id="vol-slider" min="-12" max="12" step="0.5" value="${trimMarkers.volumeDb}">
+        <strong id="vol-value">${volLabel(trimMarkers.volumeDb)}</strong>
+      </label>
+      <label class="panel-field">Fondu d'entrée
+        <input type="number" id="fade-in-s" min="0" max="30" step="0.1" value="${(trimMarkers.fadeInMs / 1000).toFixed(1)}"> s
+        <select id="fade-in-curve">${curveOptions(trimMarkers.fadeInCurve)}</select>
+      </label>
+      <label class="panel-field">Fondu de sortie
+        <input type="number" id="fade-out-s" min="0" max="30" step="0.1" value="${(trimMarkers.fadeOutMs / 1000).toFixed(1)}"> s
+        <select id="fade-out-curve">${curveOptions(trimMarkers.fadeOutCurve)}</select>
+      </label>
+    </div>`
+  const $vol = document.getElementById('vol-slider')
+  $vol.oninput = () => {
+    trimMarkers.volumeDb = Number($vol.value) || 0
+    document.getElementById('vol-value').textContent = volLabel(trimMarkers.volumeDb)
+    // Aperçu à la lecture : le volume d'un élément média est plafonné à 1, seule une
+    // baisse est donc réellement audible ici — le gain positif ne s'applique qu'au rendu.
+    wavesurfer?.setVolume(Math.min(1, Math.pow(10, trimMarkers.volumeDb / 20)))
+  }
+  document.getElementById('fade-in-s').onchange = (e) => {
+    trimMarkers.fadeInMs = Math.max(0, Math.min(30, Number(e.target.value) || 0)) * 1000
+  }
+  document.getElementById('fade-out-s').onchange = (e) => {
+    trimMarkers.fadeOutMs = Math.max(0, Math.min(30, Number(e.target.value) || 0)) * 1000
+  }
+  document.getElementById('fade-in-curve').onchange = (e) => { trimMarkers.fadeInCurve = e.target.value }
+  document.getElementById('fade-out-curve').onchange = (e) => { trimMarkers.fadeOutCurve = e.target.value }
+}
+
+function updateOverlayInfo() {
+  const $info = document.getElementById('overlay-info')
+  if (!$info || !trimMarkers) return
+  if (trimMarkers.overlayStart != null) {
+    const len = trimMarkers.overlayEnd - trimMarkers.overlayStart
+    $info.textContent = `Zone : ${formatTime(trimMarkers.overlayStart)} → ${formatTime(trimMarkers.overlayEnd)} (${len.toFixed(1)} s)`
+  } else {
+    $info.textContent = 'Aucune zone posée.'
+  }
+  const $remove = document.getElementById('btn-overlay-remove')
+  if ($remove) $remove.disabled = trimMarkers.overlayStart == null
+}
+
+function updateCutList() {
+  const $list = document.getElementById('cut-list')
+  if (!$list || !trimMarkers) return
+  if (!trimMarkers.cuts.length) {
+    $list.innerHTML = '<span class="panel-info">Aucune coupe.</span>'
+    return
+  }
+  $list.innerHTML = trimMarkers.cuts.map((c, i) => `
+    <div class="cut-row">
+      <span>Coupe ${i + 1} : ${formatTime(c.region.start)} → ${formatTime(c.region.end)}
+        (${(c.region.end - c.region.start).toFixed(1)} s)</span>
+      <button class="btn-ctrl btn-cut-delete" data-cut-id="${c.id}">🗑 Supprimer</button>
+    </div>`).join('')
+  $list.querySelectorAll('.btn-cut-delete').forEach(el => {
+    el.onclick = () => {
+      const idx = trimMarkers.cuts.findIndex(c => c.id === el.dataset.cutId)
+      if (idx === -1) return
+      trimMarkers.cuts[idx].region.remove()
+      trimMarkers.cuts.splice(idx, 1)
+      updateCutList()
+      updateSummary()
+    }
+  })
+}
+
+// Région fraîchement créée à la souris (mode montage) → clampée aux bornes de la zone
+// conservée puis suivie comme coupe. Trop petite = geste raté, on la jette.
+function adoptCutRegion(region) {
+  if (!trimMarkers || !wavesurfer) { region.remove(); return }
+  const start = Math.max(trimMarkers.trimStart, Math.min(region.start, trimMarkers.trimEnd))
+  const end = Math.min(trimMarkers.trimEnd, Math.max(region.end, start))
+  if (end - start < 0.1) { region.remove(); return }
+  trimMarkers.cutSeq += 1
+  const id = `cut-${trimMarkers.cutSeq}`
+  trimMarkers.updating = true
+  region.setOptions({ id, start, end, color: CUT_COLOR, content: regionTag('✂ COUPE', '#c62828') })
+  trimMarkers.updating = false
+  if (region.element) region.element.style.pointerEvents = 'all'
+  trimMarkers.cuts.push({ id, region })
+  updateCutList()
+  updateSummary()
+}
+
+// Étiquette posée DANS une région étendue (jingle/coupe) — même contrainte que
+// markerLabel : rester à l'intérieur de la piste (overflow hidden du conteneur de scroll).
+function regionTag(text, color) {
+  const el = document.createElement('div')
+  el.style.cssText = `background:${color};color:#fff;padding:2px 8px;border-radius:4px;font-size:10px;font-weight:bold;white-space:nowrap;position:absolute;top:2px;left:50%;transform:translateX(-50%);user-select:none;pointer-events:none;`
+  el.textContent = text
+  return el
+}
+
+// ---- Zone « jingle intérieur » (overlay backend) ----
+
+async function ensureVocalZones() {
+  if (!trimMarkers || trimMarkers.vocalLoading || !editorContext) return
+  if (trimMarkers.vocalZones === null) {
+    trimMarkers.vocalLoading = true
+    renderModePanel()
+    try {
+      const resp = editorContext.flow === 'cd'
+        ? await api('/rip/analyze-vocal', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ track_number: editorContext.trackNumber }),
+          })
+        : await api('/files/analyze-vocal', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ file_id: editorContext.fileId }),
+          })
+      trimMarkers.vocalZones = resp.zones || []
+    } catch (e) {
+      console.warn('[analyze-vocal]', e.message)
+      trimMarkers.vocalZones = []
+    } finally {
+      trimMarkers.vocalLoading = false
+    }
+  }
+  // Pré-remplit la zone avec la meilleure détection tant que l'utilisateur n'a rien posé
+  // lui-même (même heuristique « zone centrale la plus longue » que le backend).
+  if (!trimMarkers.overlayTouched && trimMarkers.overlayStart == null
+      && Array.isArray(trimMarkers.vocalZones) && trimMarkers.vocalZones.length
+      && wavesurfer && wavesurfer.getDuration() > 0) {
+    applyBestVocalZone(false)
+  }
+  renderModePanel()
+}
+
+function bestVocalZone(zones, durationSeconds) {
+  const durMs = Math.max(1, durationSeconds * 1000)
+  const central = zones.filter(z => (z.start_ms || 0) > durMs * 0.10 && (z.end_ms || 0) < durMs * 0.90)
+  const pool = central.length ? central : zones
+  return pool.reduce((best, z) => ((z.duration_ms || 0) > (best?.duration_ms || 0) ? z : best), null)
+}
+
+function applyBestVocalZone(markTouched) {
+  if (!trimMarkers || !wavesurfer) return
+  const zones = trimMarkers.vocalZones || []
+  const best = bestVocalZone(zones, wavesurfer.getDuration())
+  if (!best) return
+  setOverlayZone(best.start_ms / 1000, best.end_ms / 1000)
+  if (markTouched) trimMarkers.overlayTouched = true
+  renderModePanel()
+}
+
+function setOverlayZone(start, end) {
+  if (!trimMarkers || !wavesurfer) return
+  const s = Math.max(trimMarkers.trimStart, Math.min(start, trimMarkers.trimEnd - 0.2))
+  const e = Math.min(trimMarkers.trimEnd, Math.max(end, s + 0.2))
+  trimMarkers.overlayStart = s
+  trimMarkers.overlayEnd = e
+  if (trimMarkers.overlayRegion) {
+    trimMarkers.updating = true
+    trimMarkers.overlayRegion.setOptions({ start: s, end: e })
+    trimMarkers.updating = false
+  } else {
+    const active = trimMarkers.mode === 'jingle'
+    trimMarkers.overlayRegion = trimMarkers.regionsPlugin.addRegion({
+      id: 'overlay-zone', start: s, end: e, color: OVERLAY_COLOR,
+      drag: active, resize: active, content: regionTag('JINGLE', '#2e7d32'),
+    })
+    if (trimMarkers.overlayRegion.element) {
+      trimMarkers.overlayRegion.element.style.pointerEvents = active ? 'all' : 'none'
+    }
+  }
+  updateOverlayInfo()
+}
+
+// Pose manuelle : zone de 8 s centrée sur la position de lecture (ou le milieu de la zone
+// conservée si la lecture est au tout début) — utile quand la détection ne propose rien.
+function addManualOverlayZone() {
+  if (!trimMarkers || !wavesurfer) return
+  const span = 8
+  let center = wavesurfer.getCurrentTime()
+  if (center < trimMarkers.trimStart + 0.5 || center > trimMarkers.trimEnd - 0.5) {
+    center = (trimMarkers.trimStart + trimMarkers.trimEnd) / 2
+  }
+  setOverlayZone(center - span / 2, center + span / 2)
+  trimMarkers.overlayTouched = true
+  renderModePanel()
+}
+
+function removeOverlayZone() {
+  if (!trimMarkers) return
+  if (trimMarkers.overlayRegion) { trimMarkers.overlayRegion.remove(); trimMarkers.overlayRegion = null }
+  trimMarkers.overlayStart = null
+  trimMarkers.overlayEnd = null
+  trimMarkers.overlayTouched = true
+  renderModePanel()
+}
+
+// ---- Collecte de l'édition au moment de « Valider et continuer » ----
+
+// Coupes de montage rognées à la zone conservée, triées et fusionnées si chevauchement —
+// prêtes pour le payload /trim et pour le remappage des positions.
+function sortedCuts() {
+  if (!trimMarkers) return []
+  const list = trimMarkers.cuts
+    .map(c => ({
+      start: Math.max(trimMarkers.trimStart, Math.min(c.region.start, trimMarkers.trimEnd)),
+      end: Math.max(trimMarkers.trimStart, Math.min(c.region.end, trimMarkers.trimEnd)),
+    }))
+    .filter(c => c.end - c.start >= 0.05)
+    .sort((a, b) => a.start - b.start)
+  const merged = []
+  for (const c of list) {
+    const last = merged[merged.length - 1]
+    if (last && c.start <= last.end) last.end = Math.max(last.end, c.end)
+    else merged.push({ ...c })
+  }
+  return merged
+}
+
+/**
+ * État complet de l'éditeur → payload d'édition serveur (/trim, /files/trim) + positions
+ * remappées dans la timeline du fichier FINAL (cue points, zone jingle) pour /import.
+ * Toute position t de la waveform actuelle est décalée de ce qui est supprimé avant elle.
+ */
+function collectEditPayload() {
+  const dur = wavesurfer.getDuration()
+  const hasTrim = trimMarkers.trimStart > 0.05 || trimMarkers.trimEnd < dur - 0.05
+  const cuts = sortedCuts()
+  const volumeDb = Math.abs(trimMarkers.volumeDb) > 0.01 ? trimMarkers.volumeDb : 0
+  const fadeInMs = Math.round(trimMarkers.fadeInMs)
+  const fadeOutMs = Math.round(trimMarkers.fadeOutMs)
+  const hasEdit = hasTrim || cuts.length > 0 || volumeDb !== 0 || fadeInMs > 0 || fadeOutMs > 0
+
+  const toFinal = (t) => {
+    const clamped = Math.max(trimMarkers.trimStart, Math.min(t, trimMarkers.trimEnd))
+    let f = clamped - trimMarkers.trimStart
+    for (const c of cuts) {
+      if (c.start >= clamped) break
+      f -= Math.min(c.end, clamped) - c.start
+    }
+    return Math.max(0, f)
+  }
+  const totalCut = cuts.reduce((s, c) => s + (c.end - c.start), 0)
+  const finalDuration = Math.max(0, trimMarkers.trimEnd - trimMarkers.trimStart - totalCut)
+
+  const cueInSeconds = toFinal(trimMarkers.cueInPos)
+  const cueOutSeconds = Math.max(0, finalDuration - toFinal(trimMarkers.cueOutPos))
+
+  // Zone jingle : la zone affichée (posée ou pré-remplie) est envoyée explicitement,
+  // remappée ; retirée par l'utilisateur → enabled:false (bloque l'auto-sélection backend).
+  // Jamais vue MAIS fichier réécrit : remappe la meilleure zone détectée côté client (les
+  // vocal_zones des métadonnées d'upload deviennent caduques après réécriture, main.js les
+  // retire d'ailleurs du meta après /trim). Sinon : rien envoyé, comportement historique.
+  const zoneToFinal = (zs, ze) => {
+    const s = toFinal(zs)
+    const e = toFinal(ze)
+    return e - s >= 1 ? { start: Math.round(s * 1000) / 1000, end: Math.round(e * 1000) / 1000 } : null
+  }
+  let overlay = null
+  if (trimMarkers.overlayStart != null) {
+    const z = zoneToFinal(trimMarkers.overlayStart, trimMarkers.overlayEnd)
+    overlay = z ? { enabled: true, ...z } : { enabled: false }
+  } else if (trimMarkers.overlayTouched) {
+    overlay = { enabled: false }
+  } else if (hasEdit && Array.isArray(trimMarkers.vocalZones) && trimMarkers.vocalZones.length) {
+    const best = bestVocalZone(trimMarkers.vocalZones, dur)
+    const z = best ? zoneToFinal(best.start_ms / 1000, best.end_ms / 1000) : null
+    if (z) overlay = { enabled: true, ...z }
+  }
+
+  const editBody = hasEdit ? {
+    start_ms: Math.round(trimMarkers.trimStart * 1000),
+    end_ms: hasTrim ? Math.round(trimMarkers.trimEnd * 1000) : null,
+    cuts: cuts.map(c => ({ start_ms: Math.round(c.start * 1000), end_ms: Math.round(c.end * 1000) })),
+    volume_db: volumeDb,
+    fade_in_ms: fadeInMs,
+    fade_in_curve: trimMarkers.fadeInCurve,
+    fade_out_ms: fadeOutMs,
+    fade_out_curve: trimMarkers.fadeOutCurve,
+  } : null
+
+  return { hasEdit, editBody, cueInSeconds, cueOutSeconds, overlay }
+}
+
+// Champs overlay_zone_* du POST /import à partir de l'état collecté (null = rien envoyer).
+function overlayImportFields(overlay) {
+  if (!overlay) return {}
+  if (overlay.enabled === false) return { overlay_zone_enabled: false }
+  return { overlay_zone_start_seconds: overlay.start, overlay_zone_end_seconds: overlay.end }
+}
+
+async function onConfirmTrack() {
+  await advanceTrimming(collectEditPayload())
+}
+
+// data = résultat de collectEditPayload(), ou null pour « Passer (garder tel quel) ».
+async function advanceTrimming(data) {
   const pending = currentRipState.pendingFiles
   const track = pending[trimIndex]
 
-  if (endMs != null) {
+  if (data?.hasEdit) {
     try {
       await api('/trim', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ track_number: track.trackNumber, start_ms: startMs, end_ms: endMs }),
+        body: JSON.stringify({ track_number: track.trackNumber, ...data.editBody }),
       })
     } catch (e) {
       alert('Impossible de couper la piste : ' + e.message)
     }
   }
-  if (cueInSeconds > 0 || cueOutSeconds > 0) {
-    localCuePoints[trimIndex] = { cueInSeconds, cueOutSeconds }
+  if (data) {
+    localCuePoints[trimIndex] = {
+      cueInSeconds: data.cueInSeconds,
+      cueOutSeconds: data.cueOutSeconds,
+      overlay: data.overlay,
+    }
   }
 
   const isLast = trimIndex >= pending.length - 1
@@ -789,6 +1270,7 @@ async function sendTrack(i) {
         year: parseYear(r.year),
         cue_in_seconds: cue.cueInSeconds,
         cue_out_seconds: cue.cueOutSeconds,
+        ...overlayImportFields(cue.overlay),
       }),
     })
     r.status = 'done'
@@ -889,6 +1371,7 @@ async function uploadSelectedFiles(fileList) {
         durationSeconds: up.duration_seconds,
         cueInSeconds: 0,
         cueOutSeconds: 0,
+        overlay: null,
         bpm: null,
         key: null,
         loudnessLufs: null,
@@ -919,6 +1402,7 @@ function renderFilesTrimming() {
       <div class="card-header">
         Fichier ${filesEditingIndex + 1} / ${filesItems.length} — ${escapeHtml(item.title || item.name)}
       </div>
+      ${editorModeTabsHtml()}
       <div class="waveform-container"><div id="waveform"></div></div>
       <div class="controls-bar">
         <div class="playback-group">
@@ -950,29 +1434,24 @@ function renderFilesTrimming() {
         <div class="summary-item">BPM : <strong id="sum-bpm">—</strong></div>
         <div class="summary-item">Tonalité : <strong id="sum-key">—</strong></div>
       </div>
-      <p class="hint" style="padding:12px 24px;">
-        <strong>Zone bleue</strong> (contour bleu, toute la piste par défaut) : glissez ses
-        bords pour couper le silence/déchet — coupe définitive, avant l'envoi.
-        <strong>DÉBUT</strong> (cyan) / <strong>TRANSITION</strong>
-        (rouge) : cue points, ni l'un ni l'autre n'est obligatoire, affinables après import.
-        « Détecter automatiquement » propose des positions à partir des silences détectés.
-        BPM et tonalité sont calculés automatiquement sur la piste entière.
-        Zoomez (➕/➖) pour placer les cue points avec précision, défilement horizontal une fois zoomé.
-      </p>
+      <div id="mode-panel"></div>
       <div class="actions">
         <button class="btn-secondary" id="btn-skip-file">Passer (garder tel quel)</button>
         <button class="btn" id="btn-confirm-file">Valider et continuer</button>
       </div>
     </div>`
 
+  editorContext = { flow: 'files', fileId: item.id, initialVocalZones: null }
   setupTrimWaveform(`/files/preview/${item.id}`, () => {
     item.analyzing = true
     updateFilesTrimmingBpmKey(item)
     analyzeBpmKey(item)
   })
+  wireEditorModeTabs()
+  renderModePanel()
   updateFilesTrimmingBpmKey(item)
 
-  document.getElementById('btn-skip-file').onclick = () => advanceFilesTrimming(null, null, 0, 0)
+  document.getElementById('btn-skip-file').onclick = () => advanceFilesTrimming(null)
   document.getElementById('btn-confirm-file').onclick = onConfirmFilesTrack
   document.getElementById('btn-reset').onclick = () => trimMarkers?.resetToFull()
   document.getElementById('btn-auto-cue').onclick = () => autoDetectCue(item)
@@ -1053,30 +1532,27 @@ async function analyzeBpmKey(item) {
 }
 
 async function onConfirmFilesTrack() {
-  const hasTrim = trimMarkers.trimStart > 0.05 || trimMarkers.trimEnd < wavesurfer.getDuration() - 0.05
-  const startMs = Math.round(trimMarkers.trimStart * 1000)
-  const endMs = hasTrim ? Math.round(trimMarkers.trimEnd * 1000) : null
-  const cueInSeconds = Math.max(0, trimMarkers.cueInPos - trimMarkers.trimStart)
-  const cueOutSeconds = Math.max(0, trimMarkers.trimEnd - trimMarkers.cueOutPos)
-  await advanceFilesTrimming(startMs, endMs, cueInSeconds, cueOutSeconds)
+  await advanceFilesTrimming(collectEditPayload())
 }
 
-async function advanceFilesTrimming(startMs, endMs, cueInSeconds, cueOutSeconds) {
+// data = résultat de collectEditPayload(), ou null pour « Passer (garder tel quel) ».
+async function advanceFilesTrimming(data) {
   const item = filesItems[filesEditingIndex]
 
-  if (endMs != null) {
+  if (data?.hasEdit) {
     try {
       await api('/files/trim', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ file_id: item.id, start_ms: startMs, end_ms: endMs }),
+        body: JSON.stringify({ file_id: item.id, ...data.editBody }),
       })
     } catch (e) {
       alert('Impossible de couper le fichier : ' + e.message)
     }
   }
-  item.cueInSeconds = cueInSeconds
-  item.cueOutSeconds = cueOutSeconds
+  item.cueInSeconds = data ? data.cueInSeconds : 0
+  item.cueOutSeconds = data ? data.cueOutSeconds : 0
+  item.overlay = data ? data.overlay : null
 
   // Loudness/energy/start-end type ffmpeg côté serveur — après coupe éventuelle, pour que
   // start_type reflète le vrai début audible (cue_in_seconds).
@@ -1203,6 +1679,7 @@ async function sendFileItem(i) {
         year: parseYear(it.year),
         cue_in_seconds: it.cueInSeconds,
         cue_out_seconds: it.cueOutSeconds,
+        ...overlayImportFields(it.overlay),
         bpm: it.bpm ?? undefined,
         key: it.key ?? undefined,
         loudness_lufs: it.loudnessLufs ?? undefined,

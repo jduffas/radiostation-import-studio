@@ -113,7 +113,33 @@ async function waitUp(url, ms = 8000) {
   zl = await page.textContent('#zoom-level');
   check('UI fichiers: zoom reset ×1', zl.trim() === '×1', zl);
 
-  // "Tout réinitialiser" ne plante pas (bug historique: resetToFull inexistant)
+  // Éditeur unifié (v1.7) : bascule entre les 4 modes sans erreur JS, panneaux rendus
+  await page.click('.mode-tab[data-mode="jingle"]');
+  await page.waitForSelector('#btn-overlay-add', { timeout: 5000 });
+  // Attendre la fin de l'analyse vocale à la demande (le panneau se re-rend à la fin —
+  // cliquer pendant l'analyse risquerait un élément détaché)
+  await page.waitForFunction(() => {
+    const p = document.getElementById('mode-panel');
+    return p && !p.textContent.includes('Analyse de la voix en cours');
+  }, { timeout: 20000 });
+  // Sinus continu = aucune zone sans voix attendue → pose manuelle de la zone
+  await page.click('#btn-overlay-add');
+  const overlayInfo = await page.textContent('#overlay-info');
+  check('UI fichiers: mode jingle, zone posée manuellement', overlayInfo.includes('Zone :'), overlayInfo);
+  await page.click('#btn-overlay-remove');
+  check('UI fichiers: zone jingle retirée', (await page.textContent('#overlay-info')).includes('Aucune zone'));
+  await page.click('.mode-tab[data-mode="cut"]');
+  await page.waitForSelector('#cut-list', { timeout: 5000 });
+  check('UI fichiers: mode montage, liste vide', (await page.textContent('#cut-list')).includes('Aucune coupe'));
+  await page.click('.mode-tab[data-mode="volume"]');
+  await page.waitForSelector('#vol-slider', { timeout: 5000 });
+  await page.$eval('#vol-slider', el => { el.value = '-6'; el.dispatchEvent(new Event('input')); });
+  check('UI fichiers: mode volume, -6.0 dB affiché', (await page.textContent('#vol-value')).includes('-6.0'));
+  await page.click('.mode-tab[data-mode="cue"]');
+  check('UI fichiers: modes sans erreur JS', pageErrors.length === 0, pageErrors.join(' ; '));
+
+  // "Tout réinitialiser" ne plante pas (bug historique: resetToFull inexistant) — et remet
+  // aussi à zéro l'état de l'éditeur unifié (volume -6 dB posé juste au-dessus)
   await page.click('#btn-reset');
   check('UI fichiers: reset marqueurs sans erreur JS', pageErrors.length === 0, pageErrors.join(' ; '));
 

@@ -160,6 +160,31 @@ async function j(url, opts) {
   s = await j(`${BASE}/files/trim`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ file_id: 'nope', start_ms: 0 }) });
   check('/files/trim inconnu → 404', s.status === 404);
 
+  // ── /files/trim en mode édition complète (éditeur unifié v1.7) : coupe interne +
+  // volume + fondus en une passe filter_complex — 10s moins [2s..4s] = 8s ──
+  s = await j(`${BASE}/files/upload`, { method: 'POST', body: mkFd('Edit Me - Full Edit.wav', wavBuf) });
+  const fidEdit = s.body.file_id;
+  s = await j(`${BASE}/files/trim`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      file_id: fidEdit, start_ms: 0, end_ms: null,
+      cuts: [{ start_ms: 2000, end_ms: 4000 }],
+      volume_db: -6, fade_in_ms: 500, fade_in_curve: 'qsin', fade_out_ms: 500, fade_out_curve: 'exp',
+    }),
+  });
+  check('/files/trim montage+volume+fondus → 8.0s', s.status === 200 && Math.abs(s.body.duration_seconds - 8.0) < 0.1, JSON.stringify(s.body));
+  s = await j(`${BASE}/files/trim`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ file_id: fidEdit, cuts: [{ start_ms: 0, end_ms: 60000 }] }),
+  });
+  check('/files/trim tout coupé → 500 explicite', s.status === 500 && /conservé/i.test(s.body.error || ''), JSON.stringify(s));
+
+  // ── /files/analyze-vocal (zones sans voix, à la demande) ──
+  s = await j(`${BASE}/files/analyze-vocal`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ file_id: fidEdit }) });
+  check('/files/analyze-vocal → tableau zones', s.status === 200 && Array.isArray(s.body.zones), JSON.stringify(s.body));
+  s = await j(`${BASE}/files/analyze-vocal`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ file_id: 'nope' }) });
+  check('/files/analyze-vocal inconnu → 404', s.status === 404);
+
   // ── /files/detect-cue sur fichier avec 2s de silence en tête, 1.5s en queue ──
   const paddedBuf = fs.readFileSync(path.join(FIX, 'padded.wav'));
   s = await j(`${BASE}/files/upload`, { method: 'POST', body: mkFd('padded.wav', paddedBuf) });
