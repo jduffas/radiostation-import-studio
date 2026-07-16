@@ -461,6 +461,9 @@ function renderTrimming() {
           <button class="btn-preview" id="btn-preview-start">🔊 Écouter</button>
         </div>
         <div class="summary-item">
+          <span class="summary-dot dot-orange"></span> Intro : <strong id="sum-intro">00:00.000</strong>
+        </div>
+        <div class="summary-item">
           <span class="summary-dot dot-red"></span> Transition (avant fin) : <strong id="sum-cueout">00:00.000</strong>
           <button class="btn-preview" id="btn-preview-end">🔊 Écouter</button>
         </div>
@@ -540,6 +543,9 @@ function setupTrimWaveform(previewUrl, onReady) {
 
   trimMarkers = {
     trimStart: 0, trimEnd: 0, cueInPos: 0, cueOutPos: 0,
+    // Fin d'intro (parité éditeur du site, v1.8) : position absolue dans la waveform,
+    // = cueInPos quand pas d'intro. Envoyée à /import via intro_seconds (timeline finale).
+    introPos: 0, introRegion: null,
     keepRegion: null, cueInRegion: null, cueOutRegion: null, updating: false,
     // Éditeur unifié (v1.7) : mode courant + zone jingle intérieur + montage + volume/fondus
     mode: 'cue', // 'cue' | 'jingle' | 'cut' | 'volume'
@@ -557,8 +563,10 @@ function setupTrimWaveform(previewUrl, onReady) {
     resetToFull() {
       const dur = wavesurfer.getDuration()
       this.trimStart = 0; this.trimEnd = dur; this.cueInPos = 0; this.cueOutPos = dur
+      this.introPos = 0
       this.keepRegion?.setOptions({ start: 0, end: dur })
       this.cueInRegion?.setOptions({ start: 0 })
+      this.introRegion?.setOptions({ start: 0 })
       this.cueOutRegion?.setOptions({ start: dur })
       this.cuts.forEach(c => c.region.remove())
       this.cuts = []
@@ -576,7 +584,7 @@ function setupTrimWaveform(previewUrl, onReady) {
   // coupes après clamp — les régions connues (trim-keep/cue/overlay) passent aussi par cet
   // événement à leur création, d'où le garde sur l'id.
   regions.on('region-created', (region) => {
-    if (['trim-keep', 'cue-in', 'cue-out', 'overlay-zone'].includes(region.id)) return
+    if (['trim-keep', 'cue-in', 'intro-end', 'cue-out', 'overlay-zone'].includes(region.id)) return
     if (String(region.id).startsWith('cut-')) return
     adoptCutRegion(region)
   })
@@ -596,8 +604,13 @@ function setupTrimWaveform(previewUrl, onReady) {
     trimMarkers.trimEnd = dur
     trimMarkers.cueInPos = 0
     trimMarkers.cueOutPos = dur
+    trimMarkers.introPos = 0
     trimMarkers.keepRegion = regions.addRegion({ id: 'trim-keep', start: 0, end: dur, color: 'rgba(74,144,226,0.15)', drag: true, resize: true })
     trimMarkers.cueInRegion = regions.addRegion({ id: 'cue-in', start: 0, color: 'rgba(33,150,243,0.9)', drag: true, resize: false, content: markerLabel('DÉBUT', '#2196f3') })
+    // Étiquette INTRO décalée verticalement (top 26px) : DÉBUT et INTRO démarrent tous
+    // deux à 0 — sans décalage, une étiquette masquerait l'autre et volerait son drag
+    // (même problème que SKIP/INTRO superposés dans l'éditeur du site).
+    trimMarkers.introRegion = regions.addRegion({ id: 'intro-end', start: 0, color: 'rgba(255,152,0,0.9)', drag: true, resize: false, content: markerLabel('INTRO', '#ff9800', 26) })
     trimMarkers.cueOutRegion = regions.addRegion({ id: 'cue-out', start: dur, color: 'rgba(244,67,54,0.9)', drag: true, resize: false, content: markerLabel('TRANSITION', '#f44336') })
     // Applique l'interactivité du mode courant (les régions viennent seulement d'exister) —
     // en mode 'cue' par défaut, comportement identique à avant l'éditeur unifié.
@@ -631,13 +644,15 @@ function setupTrimWaveform(previewUrl, onReady) {
   }
 }
 
-function markerLabel(text, color) {
+function markerLabel(text, color, top = 2) {
   const el = document.createElement('div')
   // top POSITIF (à l'intérieur de la piste) : le conteneur de scroll de wavesurfer est en
   // overflow hidden — à top:-22px (au-dessus de la piste) l'étiquette était rognée, donc
   // invisible ET impossible à saisir (elle est la vraie poignée de drag du marqueur).
   // Même contrainte que le triangle du curseur, cf. commentaire ::part(cursor) de style.css.
-  el.style.cssText = `background:${color};color:#fff;padding:3px 10px;border-radius:4px;font-size:10px;font-weight:bold;white-space:nowrap;cursor:ew-resize;position:absolute;top:2px;left:50%;transform:translateX(-50%);user-select:none;`
+  // `top` paramétrable : étiquettes superposées au même instant (DÉBUT/INTRO à 0) empilées
+  // verticalement pour rester saisissables toutes les deux.
+  el.style.cssText = `background:${color};color:#fff;padding:3px 10px;border-radius:4px;font-size:10px;font-weight:bold;white-space:nowrap;cursor:ew-resize;position:absolute;top:${top}px;left:50%;transform:translateX(-50%);user-select:none;`
   el.textContent = text
   return el
 }
@@ -658,6 +673,7 @@ function onRegionMoved(region) {
     // affichée (clampCueMarkers écrasait cueOutPos de façon irréversible en rétrécissant,
     // sans jamais le restaurer en ré-agrandissant).
     trimMarkers.cueInPos += start - prevStart
+    trimMarkers.introPos += start - prevStart
     trimMarkers.cueOutPos += end - prevEnd
     if (Math.abs(region.start - start) > 0.01 || Math.abs(region.end - end) > 0.01) {
       trimMarkers.updating = true
@@ -667,11 +683,27 @@ function onRegionMoved(region) {
     clampCueMarkers()
     trimMarkers.updating = true
     trimMarkers.cueInRegion?.setOptions({ start: trimMarkers.cueInPos })
+    trimMarkers.introRegion?.setOptions({ start: trimMarkers.introPos })
     trimMarkers.cueOutRegion?.setOptions({ start: trimMarkers.cueOutPos })
     trimMarkers.updating = false
   } else if (region.id === 'cue-in') {
     const clamped = Math.max(trimMarkers.trimStart, Math.min(region.start, trimMarkers.cueOutPos - 0.1))
     trimMarkers.cueInPos = clamped
+    if (Math.abs(region.start - clamped) > 0.01) {
+      trimMarkers.updating = true
+      region.setOptions({ start: clamped })
+      trimMarkers.updating = false
+    }
+    // L'intro ne peut pas finir avant le début (sémantique site : intro ≥ cue_in)
+    if (trimMarkers.introPos < clamped) {
+      trimMarkers.introPos = clamped
+      trimMarkers.updating = true
+      trimMarkers.introRegion?.setOptions({ start: clamped })
+      trimMarkers.updating = false
+    }
+  } else if (region.id === 'intro-end') {
+    const clamped = Math.max(trimMarkers.cueInPos, Math.min(region.start, trimMarkers.trimEnd))
+    trimMarkers.introPos = clamped
     if (Math.abs(region.start - clamped) > 0.01) {
       trimMarkers.updating = true
       region.setOptions({ start: clamped })
@@ -721,6 +753,11 @@ function clampCueMarkers() {
     trimMarkers.cueOutPos = newOut
     trimMarkers.cueOutRegion?.setOptions({ start: newOut })
   }
+  const newIntro = Math.max(trimMarkers.cueInPos, Math.min(trimMarkers.introPos, trimMarkers.trimEnd))
+  if (Math.abs(newIntro - trimMarkers.introPos) > 0.01) {
+    trimMarkers.introPos = newIntro
+    trimMarkers.introRegion?.setOptions({ start: newIntro })
+  }
 }
 
 function updateSummary() {
@@ -729,13 +766,25 @@ function updateSummary() {
   const totalCut = sortedCuts().reduce((s, c) => s + (c.end - c.start), 0)
   const kept = Math.max(0, trimMarkers.trimEnd - trimMarkers.trimStart - totalCut)
   const cueIn = Math.max(0, trimMarkers.cueInPos - trimMarkers.trimStart)
+  const intro = Math.max(0, trimMarkers.introPos - trimMarkers.trimStart)
   const cueOut = Math.max(0, trimMarkers.trimEnd - trimMarkers.cueOutPos)
   const $kept = document.getElementById('sum-kept')
   const $in = document.getElementById('sum-cuein')
+  const $intro = document.getElementById('sum-intro')
   const $out = document.getElementById('sum-cueout')
   if ($kept) $kept.textContent = formatTime(kept)
   if ($in) $in.textContent = formatTime(cueIn)
+  if ($intro) $intro.textContent = formatTime(intro)
   if ($out) $out.textContent = formatTime(cueOut)
+  // Synchronise les saisies numériques du mode cue — sauf celle en cours d'édition
+  syncNumInput('inp-cuein', cueIn)
+  syncNumInput('inp-intro', intro)
+  syncNumInput('inp-cueout', cueOut)
+}
+
+function syncNumInput(id, valueSeconds) {
+  const el = document.getElementById(id)
+  if (el && document.activeElement !== el) el.value = valueSeconds.toFixed(2)
 }
 
 // ══ Éditeur unifié (v1.7) : modes, zone jingle intérieur, montage, volume & fondus ══════
@@ -776,6 +825,7 @@ function setEditorMode(mode) {
   }
   setActive(trimMarkers.keepRegion, mode === 'cue', true)
   setActive(trimMarkers.cueInRegion, mode === 'cue', false)
+  setActive(trimMarkers.introRegion, mode === 'cue', false)
   setActive(trimMarkers.cueOutRegion, mode === 'cue', false)
   setActive(trimMarkers.overlayRegion, mode === 'jingle', true)
   trimMarkers.cuts.forEach(c => setActive(c.region, mode === 'cut', true))
@@ -799,11 +849,52 @@ function renderModePanel() {
       <p class="hint mode-hint">
         <strong>Zone bleue</strong> (toute la piste par défaut) : glissez ses bords pour couper
         le silence/déchet en tête/queue — coupe définitive, avant l'envoi.
-        <strong>DÉBUT</strong> (cyan) / <strong>TRANSITION</strong> (rouge) : cue points, ni
-        l'un ni l'autre n'est obligatoire, affinables après import.
+        <strong>DÉBUT</strong> (cyan) / <strong>INTRO</strong> (orange, fin de l'intro parlée/instrumentale)
+        / <strong>TRANSITION</strong> (rouge) : cue points, aucun n'est obligatoire, affinables après import.
         ${editorContext?.flow === 'files' ? '« Détecter automatiquement » propose des positions à partir des silences détectés. ' : ''}
-        Zoomez (➕/➖) pour les placer avec précision, défilement horizontal une fois zoomé.
-      </p>`
+        Zoomez (➕/➖) pour les placer avec précision.
+        Raccourcis pendant la lecture : <strong>Espace</strong> lecture/pause,
+        <strong>I</strong> pose DÉBUT, <strong>N</strong> pose INTRO, <strong>O</strong> pose TRANSITION.
+      </p>
+      <div class="panel-row">
+        <label class="panel-field">Début (s)
+          <input type="number" id="inp-cuein" min="0" step="0.01" value="${(trimMarkers.cueInPos - trimMarkers.trimStart).toFixed(2)}">
+        </label>
+        <label class="panel-field">Fin d'intro (s)
+          <input type="number" id="inp-intro" min="0" step="0.01" value="${(trimMarkers.introPos - trimMarkers.trimStart).toFixed(2)}">
+        </label>
+        <label class="panel-field">Transition avant fin (s)
+          <input type="number" id="inp-cueout" min="0" step="0.01" value="${(trimMarkers.trimEnd - trimMarkers.cueOutPos).toFixed(2)}">
+        </label>
+      </div>`
+    document.getElementById('inp-cuein').onchange = (e) => {
+      const v = Math.max(0, Number(e.target.value) || 0)
+      const pos = Math.max(trimMarkers.trimStart, Math.min(trimMarkers.trimStart + v, trimMarkers.cueOutPos - 0.1))
+      trimMarkers.cueInPos = pos
+      trimMarkers.updating = true
+      trimMarkers.cueInRegion?.setOptions({ start: pos })
+      trimMarkers.updating = false
+      clampCueMarkers()
+      updateSummary()
+    }
+    document.getElementById('inp-intro').onchange = (e) => {
+      const v = Math.max(0, Number(e.target.value) || 0)
+      const pos = Math.max(trimMarkers.cueInPos, Math.min(trimMarkers.trimStart + v, trimMarkers.trimEnd))
+      trimMarkers.introPos = pos
+      trimMarkers.updating = true
+      trimMarkers.introRegion?.setOptions({ start: pos })
+      trimMarkers.updating = false
+      updateSummary()
+    }
+    document.getElementById('inp-cueout').onchange = (e) => {
+      const v = Math.max(0, Number(e.target.value) || 0)
+      const pos = Math.min(trimMarkers.trimEnd, Math.max(trimMarkers.trimEnd - v, trimMarkers.cueInPos + 0.1))
+      trimMarkers.cueOutPos = pos
+      trimMarkers.updating = true
+      trimMarkers.cueOutRegion?.setOptions({ start: pos })
+      trimMarkers.updating = false
+      updateSummary()
+    }
     return
   }
 
@@ -1108,6 +1199,7 @@ function collectEditPayload() {
   const finalDuration = Math.max(0, trimMarkers.trimEnd - trimMarkers.trimStart - totalCut)
 
   const cueInSeconds = toFinal(trimMarkers.cueInPos)
+  const introSeconds = Math.max(cueInSeconds, toFinal(trimMarkers.introPos))
   const cueOutSeconds = Math.max(0, finalDuration - toFinal(trimMarkers.cueOutPos))
 
   // Zone jingle : la zone affichée (posée ou pré-remplie) est envoyée explicitement,
@@ -1143,7 +1235,7 @@ function collectEditPayload() {
     fade_out_curve: trimMarkers.fadeOutCurve,
   } : null
 
-  return { hasEdit, editBody, cueInSeconds, cueOutSeconds, overlay }
+  return { hasEdit, editBody, cueInSeconds, introSeconds, cueOutSeconds, overlay }
 }
 
 // Champs overlay_zone_* du POST /import à partir de l'état collecté (null = rien envoyer).
@@ -1176,6 +1268,7 @@ async function advanceTrimming(data) {
   if (data) {
     localCuePoints[trimIndex] = {
       cueInSeconds: data.cueInSeconds,
+      introSeconds: data.introSeconds,
       cueOutSeconds: data.cueOutSeconds,
       overlay: data.overlay,
     }
@@ -1269,6 +1362,7 @@ async function sendTrack(i) {
         album: r.album || undefined,
         year: parseYear(r.year),
         cue_in_seconds: cue.cueInSeconds,
+        intro_seconds: cue.introSeconds || undefined,
         cue_out_seconds: cue.cueOutSeconds,
         ...overlayImportFields(cue.overlay),
       }),
@@ -1370,6 +1464,7 @@ async function uploadSelectedFiles(fileList) {
         year: '',
         durationSeconds: up.duration_seconds,
         cueInSeconds: 0,
+        introSeconds: 0,
         cueOutSeconds: 0,
         overlay: null,
         bpm: null,
@@ -1424,6 +1519,9 @@ function renderFilesTrimming() {
         <div class="summary-item">
           <span class="summary-dot dot-cyan"></span> Début (skip) : <strong id="sum-cuein">00:00.000</strong>
           <button class="btn-preview" id="btn-preview-start">🔊 Écouter</button>
+        </div>
+        <div class="summary-item">
+          <span class="summary-dot dot-orange"></span> Intro : <strong id="sum-intro">00:00.000</strong>
         </div>
         <div class="summary-item">
           <span class="summary-dot dot-red"></span> Transition (avant fin) : <strong id="sum-cueout">00:00.000</strong>
@@ -1551,6 +1649,7 @@ async function advanceFilesTrimming(data) {
     }
   }
   item.cueInSeconds = data ? data.cueInSeconds : 0
+  item.introSeconds = data ? data.introSeconds : 0
   item.cueOutSeconds = data ? data.cueOutSeconds : 0
   item.overlay = data ? data.overlay : null
 
@@ -1678,6 +1777,7 @@ async function sendFileItem(i) {
         album: it.album || undefined,
         year: parseYear(it.year),
         cue_in_seconds: it.cueInSeconds,
+        intro_seconds: it.introSeconds || undefined,
         cue_out_seconds: it.cueOutSeconds,
         ...overlayImportFields(it.overlay),
         bpm: it.bpm ?? undefined,
@@ -1705,5 +1805,41 @@ async function sendAllFileItems() {
 function escapeHtml(s) {
   return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]))
 }
+
+// ── Raccourcis clavier de l'éditeur (parité site, v1.8) ─────────────────────────
+// Espace = lecture/pause ; en mode cue : I pose DÉBUT, N pose INTRO, O pose TRANSITION
+// à la position de lecture. Ignorés pendant la saisie dans un champ.
+function setCueMarkerAtPlayhead(kind) {
+  if (!trimMarkers || !wavesurfer) return
+  const t = wavesurfer.getCurrentTime()
+  trimMarkers.updating = true
+  if (kind === 'cue-in') {
+    trimMarkers.cueInPos = Math.max(trimMarkers.trimStart, Math.min(t, trimMarkers.cueOutPos - 0.1))
+    trimMarkers.cueInRegion?.setOptions({ start: trimMarkers.cueInPos })
+  } else if (kind === 'intro') {
+    trimMarkers.introPos = Math.max(trimMarkers.cueInPos, Math.min(t, trimMarkers.trimEnd))
+    trimMarkers.introRegion?.setOptions({ start: trimMarkers.introPos })
+  } else if (kind === 'cue-out') {
+    trimMarkers.cueOutPos = Math.min(trimMarkers.trimEnd, Math.max(t, trimMarkers.cueInPos + 0.1))
+    trimMarkers.cueOutRegion?.setOptions({ start: trimMarkers.cueOutPos })
+  }
+  trimMarkers.updating = false
+  clampCueMarkers()
+  updateSummary()
+}
+
+document.addEventListener('keydown', (e) => {
+  if (!wavesurfer || !trimMarkers) return
+  const tag = e.target?.tagName
+  if (['INPUT', 'TEXTAREA', 'SELECT'].includes(tag)) return
+  if (e.code === 'Space') {
+    e.preventDefault()
+    wavesurfer.playPause()
+  } else if (trimMarkers.mode === 'cue') {
+    if (e.code === 'KeyI') { e.preventDefault(); setCueMarkerAtPlayhead('cue-in') }
+    else if (e.code === 'KeyN') { e.preventDefault(); setCueMarkerAtPlayhead('intro') }
+    else if (e.code === 'KeyO') { e.preventDefault(); setCueMarkerAtPlayhead('cue-out') }
+  }
+})
 
 init()

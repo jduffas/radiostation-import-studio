@@ -138,6 +138,25 @@ async function waitUp(url, ms = 8000) {
   await page.click('.mode-tab[data-mode="cue"]');
   check('UI fichiers: modes sans erreur JS', pageErrors.length === 0, pageErrors.join(' ; '));
 
+  // Parité v1.8 : marqueur INTRO + saisie numérique des cue points
+  const introMarkers = await page.locator('#waveform [part~="intro-end"]').count();
+  check('UI fichiers: marqueur INTRO présent', introMarkers === 1, String(introMarkers));
+  await page.fill('#inp-cuein', '1.5');
+  await page.dispatchEvent('#inp-cuein', 'change');
+  const sumCueIn = await page.textContent('#sum-cuein');
+  check('UI fichiers: saisie numérique Début → résumé', sumCueIn.trim() === '00:01.500', sumCueIn);
+  await page.fill('#inp-intro', '3');
+  await page.dispatchEvent('#inp-intro', 'change');
+  const sumIntro = await page.textContent('#sum-intro');
+  check('UI fichiers: saisie numérique Intro → résumé', sumIntro.trim() === '00:03.000', sumIntro);
+  // Raccourci clavier O : pose TRANSITION à la position de lecture (0 → clampé à cueIn+0.1).
+  // Blur d'abord : le focus est resté dans #inp-intro et les raccourcis sont (par design)
+  // ignorés pendant la saisie dans un champ.
+  await page.locator('#inp-intro').blur();
+  await page.keyboard.press('KeyO');
+  const sumCueOutShortcut = await page.textContent('#sum-cueout');
+  check('UI fichiers: raccourci O pose TRANSITION', sumCueOutShortcut.trim() !== '00:00.000', sumCueOutShortcut);
+
   // "Tout réinitialiser" ne plante pas (bug historique: resetToFull inexistant) — et remet
   // aussi à zéro l'état de l'éditeur unifié (volume -6 dB posé juste au-dessus)
   await page.click('#btn-reset');
