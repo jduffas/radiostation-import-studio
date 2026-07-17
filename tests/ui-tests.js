@@ -145,6 +145,20 @@ async function waitUp(url, ms = 8000) {
   const volPoints = await page.locator('.vol-point').count();
   check('UI fichiers: point de volume ajouté au clic', volPoints === 1, String(volPoints));
   check('UI fichiers: compteur de points affiché', (await page.textContent('#mode-panel')).includes('1'));
+
+  // Poignées de fondu draggables « façon Pro Tools » (parité site) : glisser la poignée
+  // depuis le coin haut-gauche doit régler fadeInMs (champ #fade-in-s synchronisé en direct).
+  await page.waitForSelector('.fade-overlay', { state: 'attached', timeout: 5000 });
+  const fadeInBefore = Number(await page.$eval('#fade-in-s', el => el.value));
+  const fadeSvgBox = await page.locator('.fade-svg').boundingBox();
+  await page.mouse.move(fadeSvgBox.x, fadeSvgBox.y);
+  await page.mouse.down();
+  await page.mouse.move(fadeSvgBox.x + fadeSvgBox.width * 0.2, fadeSvgBox.y, { steps: 10 });
+  await page.mouse.up();
+  const fadeInAfter = Number(await page.$eval('#fade-in-s', el => el.value));
+  check('UI fichiers: poignée de fondu d\'entrée modifie #fade-in-s', fadeInAfter > fadeInBefore, `${fadeInBefore} → ${fadeInAfter}`);
+  check('UI fichiers: poignées de fondu sans erreur JS', pageErrors.length === 0, pageErrors.join(' ; '));
+
   await page.click('.mode-tab[data-mode="cue"]');
   check('UI fichiers: modes sans erreur JS', pageErrors.length === 0, pageErrors.join(' ; '));
 

@@ -528,6 +528,7 @@ function applyZoom(level) {
 function setupTrimWaveform(previewUrl, onReady) {
   if (wavesurfer) { wavesurfer.destroy(); wavesurfer = null }
   volOverlay = null // le DOM #waveform est recréé à chaque piste/fichier
+  fadeOverlay = null
   const regions = RegionsPlugin.create()
   wavesurfer = WaveSurfer.create({
     container: '#waveform',
@@ -579,6 +580,8 @@ function setupTrimWaveform(previewUrl, onReady) {
       this.volumePoints = []
       renderVolumeCurve()
       updateVolumeOverlayVisibility()
+      renderFadeOverlay()
+      updateFadeOverlayVisibility()
       wavesurfer?.setVolume(1)
       renderModePanel()
       updateSummary()
@@ -621,6 +624,8 @@ function setupTrimWaveform(previewUrl, onReady) {
     // en mode 'cue' par défaut, comportement identique à avant l'éditeur unifié.
     ensureVolumeOverlay()
     updateVolumeOverlayVisibility()
+    ensureFadeOverlay()
+    updateFadeOverlayVisibility()
     setEditorMode(trimMarkers.mode)
     updateSummary()
     onReady?.()
@@ -855,6 +860,9 @@ function setEditorMode(mode) {
   ensureVolumeOverlay()
   updateVolumeOverlayVisibility()
   renderVolumeCurve()
+  ensureFadeOverlay()
+  updateFadeOverlayVisibility()
+  renderFadeOverlay()
 
   renderModePanel()
 }
@@ -1012,12 +1020,14 @@ function renderModePanel() {
   }
   document.getElementById('fade-in-s').onchange = (e) => {
     trimMarkers.fadeInMs = Math.max(0, Math.min(30, Number(e.target.value) || 0)) * 1000
+    renderFadeOverlay()
   }
   document.getElementById('fade-out-s').onchange = (e) => {
     trimMarkers.fadeOutMs = Math.max(0, Math.min(30, Number(e.target.value) || 0)) * 1000
+    renderFadeOverlay()
   }
-  document.getElementById('fade-in-curve').onchange = (e) => { trimMarkers.fadeInCurve = e.target.value }
-  document.getElementById('fade-out-curve').onchange = (e) => { trimMarkers.fadeOutCurve = e.target.value }
+  document.getElementById('fade-in-curve').onchange = (e) => { trimMarkers.fadeInCurve = e.target.value; renderFadeOverlay() }
+  document.getElementById('fade-out-curve').onchange = (e) => { trimMarkers.fadeOutCurve = e.target.value; renderFadeOverlay() }
 }
 
 function updateOverlayInfo() {
@@ -1248,6 +1258,142 @@ function deleteVolumePoint(idx) {
   renderModePanel()
   updateVolumeOverlayVisibility()
   updatePreviewVolume(wavesurfer?.getCurrentTime() || 0)
+}
+
+// ---- Poignées de fondu draggables « façon Pro Tools » (parité site) ───────────
+// Superposées à la waveform en mode volume (zoom verrouillé, comme la courbe
+// d'automation) : la durée du fondu se règle en glissant la poignée depuis le
+// coin haut du début/de la fin de piste. Courbe pointillée + zone ombrée
+// redessinées en direct pendant le drag — pas de redessin des barres de la
+// waveform elle-même (peaks) : coûteux pour un gain visuel marginal, ce
+// ombrage donne le même repère immédiat sans manipuler les données audio.
+
+const FADE_N_SAMPLES = 20
+const FADE_MIN_GAP_S = 0.05 // écart minimal entre fin du fondu d'entrée et début du fondu de sortie
+const FADE_MAX_S = 30 // même borne que l'attribut max des champs #fade-in-s/#fade-out-s
+
+// Approximations visuelles des courbes ffmpeg (afade) — le rendu réel est fait côté
+// serveur avec le même nom de courbe : simple repère visuel, pas besoin de reproduire
+// la formule exacte.
+const FADE_CURVE_FN = {
+  tri: x => x,
+  qsin: x => Math.sin(x * Math.PI / 2),
+  esin: x => 1 - Math.cos(x * Math.PI / 2),
+  exp: x => x * x,
+  log: x => Math.log10(1 + 9 * x),
+}
+
+function fadeGainAt(curve, x) {
+  const fn = FADE_CURVE_FN[curve] || FADE_CURVE_FN.tri
+  return Math.max(0, Math.min(1, fn(Math.max(0, Math.min(1, x)))))
+}
+
+let fadeOverlay = null // { host, svg } — recréé à chaque nouvelle piste
+let fadeDragging = null // 'in' | 'out' | null
+
+function ensureFadeOverlay() {
+  if (fadeOverlay) return fadeOverlay
+  const $wf = document.getElementById('waveform')
+  if (!$wf) return null
+  const host = document.createElement('div')
+  host.className = 'fade-overlay'
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
+  svg.setAttribute('class', 'fade-svg')
+  host.appendChild(svg)
+  $wf.appendChild(host)
+  fadeOverlay = { host, svg }
+  renderFadeOverlay()
+  return fadeOverlay
+}
+
+function updateFadeOverlayVisibility() {
+  if (!fadeOverlay || !trimMarkers) return
+  fadeOverlay.host.style.display = trimMarkers.mode === 'volume' ? '' : 'none'
+}
+
+function renderFadeOverlay() {
+  if (!fadeOverlay || !wavesurfer || !trimMarkers) return
+  const w = fadeOverlay.host.clientWidth || 600
+  const h = fadeOverlay.host.clientHeight || 140
+  const dur = wavesurfer.getDuration() || 1
+  const durMs = dur * 1000
+  const timeToX = (ms) => (ms / durMs) * w
+  const poly = (pts) => pts.map(([x, y]) => `${x},${y}`).join(' L ')
+
+  const inEndX = timeToX(trimMarkers.fadeInMs)
+  const inPts = []
+  for (let i = 0; i <= FADE_N_SAMPLES; i++) {
+    const frac = i / FADE_N_SAMPLES
+    inPts.push([frac * inEndX, (1 - fadeGainAt(trimMarkers.fadeInCurve, frac)) * h])
+  }
+  const outStartX = w - timeToX(trimMarkers.fadeOutMs)
+  const outPts = []
+  for (let i = 0; i <= FADE_N_SAMPLES; i++) {
+    const frac = i / FADE_N_SAMPLES
+    outPts.push([outStartX + frac * (w - outStartX), (1 - fadeGainAt(trimMarkers.fadeOutCurve, 1 - frac)) * h])
+  }
+
+  let inner = ''
+  if (inPts.length >= 2) {
+    inner += `<path d="M 0,0 L ${poly(inPts)} L ${inEndX},0 Z" class="fade-fill"></path>`
+    inner += `<path d="M ${poly(inPts)}" class="fade-dash"></path>`
+  }
+  if (outPts.length >= 2) {
+    inner += `<path d="M ${w},0 L ${poly(outPts)} L ${outStartX},0 Z" class="fade-fill"></path>`
+    inner += `<path d="M ${poly(outPts)}" class="fade-dash"></path>`
+  }
+  inner += `<g class="fade-handle-hit" data-side="in"><circle cx="${inEndX}" cy="0" r="${fadeDragging === 'in' ? 9 : 7}" class="fade-handle${fadeDragging === 'in' ? ' fade-handle-active' : ''}"></circle></g>`
+  inner += `<g class="fade-handle-hit" data-side="out"><circle cx="${outStartX}" cy="0" r="${fadeDragging === 'out' ? 9 : 7}" class="fade-handle${fadeDragging === 'out' ? ' fade-handle-active' : ''}"></circle></g>`
+
+  fadeOverlay.svg.setAttribute('viewBox', `0 0 ${w} ${h}`)
+  fadeOverlay.svg.setAttribute('width', w)
+  fadeOverlay.svg.setAttribute('height', h)
+  fadeOverlay.svg.innerHTML = inner
+
+  const svgX = (evt) => evt.clientX - fadeOverlay.svg.getBoundingClientRect().left
+  const xToTimeMs = (x) => Math.max(0, Math.min(durMs, (x / w) * durMs))
+
+  fadeOverlay.svg.querySelectorAll('.fade-handle-hit').forEach(el => {
+    const side = el.dataset.side
+    el.addEventListener('mousedown', (e) => {
+      e.stopPropagation()
+      e.preventDefault()
+      fadeDragging = side
+      renderFadeOverlay()
+      const fadeInS0 = trimMarkers.fadeInMs / 1000
+      const fadeOutS0 = trimMarkers.fadeOutMs / 1000
+      const onMove = (me) => {
+        const x = svgX(me)
+        if (side === 'in') {
+          const maxS = Math.max(0, Math.min(FADE_MAX_S, dur - fadeOutS0 - FADE_MIN_GAP_S))
+          trimMarkers.fadeInMs = Math.round(Math.min(maxS, xToTimeMs(x) / 1000) * 1000)
+        } else {
+          const maxS = Math.max(0, Math.min(FADE_MAX_S, dur - fadeInS0 - FADE_MIN_GAP_S))
+          const fromEnd = Math.min(maxS, (durMs - xToTimeMs(x)) / 1000)
+          trimMarkers.fadeOutMs = Math.round(fromEnd * 1000)
+        }
+        renderFadeOverlay()
+        syncFadeInputs()
+      }
+      const onUp = () => {
+        fadeDragging = null
+        document.removeEventListener('mousemove', onMove)
+        document.removeEventListener('mouseup', onUp)
+        renderFadeOverlay()
+      }
+      document.addEventListener('mousemove', onMove)
+      document.addEventListener('mouseup', onUp)
+    })
+  })
+}
+
+// Synchronise les champs numériques du panneau pendant le drag, sans reconstruire tout
+// le panneau (perdrait le focus/l'état des <select> de courbe).
+function syncFadeInputs() {
+  const $in = document.getElementById('fade-in-s')
+  const $out = document.getElementById('fade-out-s')
+  if ($in && document.activeElement !== $in) $in.value = (trimMarkers.fadeInMs / 1000).toFixed(1)
+  if ($out && document.activeElement !== $out) $out.value = (trimMarkers.fadeOutMs / 1000).toFixed(1)
 }
 
 // ---- Zone « jingle intérieur » (overlay backend) ----

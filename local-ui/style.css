@@ -374,31 +374,32 @@ code {
   margin-top: 8px;
 }
 
-/* ── Éditeur unifié (v1.7) : onglets de mode + panneaux ─────────────────────── */
+/* ── Éditeur unifié (v1.7) : sélecteur d'outils (boutons) + panneaux ────────── */
 
 .mode-tabs {
   display: flex;
   gap: 8px;
-  padding: 12px 24px 0;
+  padding: 12px 24px;
   flex-wrap: wrap;
+  border-bottom: 1px solid #333;
 }
 
 .mode-tab {
   background: #222;
   color: var(--text-dim);
   border: 1px solid #333;
-  border-radius: 6px 6px 0 0;
+  border-radius: 6px;
   padding: 8px 14px;
   cursor: pointer;
   font-size: 0.9rem;
 }
 
-.mode-tab:hover { color: var(--text); }
+.mode-tab:hover { color: var(--text); border-color: #4a4a4a; }
 
 .mode-tab.active {
-  background: rgba(74, 144, 226, 0.15);
+  background: var(--blue);
   border-color: var(--blue);
-  color: var(--text);
+  color: #fff;
   font-weight: 600;
 }
 
@@ -512,8 +513,10 @@ code {
 .vol-point:hover { fill: #fff; stroke: #ffd940; }
 
 .vol-clear-btn {
+  /* bottom (pas top) : les poignées de fondu occupent les deux coins hauts de la
+     waveform en mode volume — éviter la superposition. */
   position: absolute;
-  top: 4px;
+  bottom: 4px;
   right: 4px;
   z-index: 7;
   pointer-events: all;
@@ -527,3 +530,35 @@ code {
 }
 
 .vol-clear-btn:hover { border-color: #f66; color: #f66; }
+
+/* ── Poignées de fondu draggables « façon Pro Tools » (parité site v?.??) ───── */
+
+.fade-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 8; /* au-dessus de la courbe de volume (z-index 6) */
+  pointer-events: none;
+  user-select: none;
+}
+
+.fade-svg { position: absolute; inset: 0; width: 100%; height: 100%; display: block; overflow: visible; }
+
+.fade-fill { fill: rgba(74, 144, 226, 0.18); }
+.fade-dash {
+  fill: none;
+  stroke: var(--blue);
+  stroke-width: 2;
+  stroke-dasharray: 6 4;
+  stroke-linecap: round;
+}
+
+.fade-handle-hit { cursor: ew-resize; pointer-events: all; }
+
+.fade-handle {
+  fill: var(--blue);
+  stroke: #111;
+  stroke-width: 2;
+}
+
+.fade-handle-hit:hover .fade-handle:not(.fade-handle-active) { fill: #7db3ee; }
+.fade-handle-active { fill: #ffd940 !important; }
