@@ -13,6 +13,7 @@ const $app = document.getElementById('app')
 const $pairingIndicator = document.getElementById('pairing-indicator')
 const $vocalToggle = document.getElementById('vocal-toggle')
 const $fastRipToggle = document.getElementById('fast-rip-toggle')
+const $fastRipLabel = document.getElementById('fast-rip-label')
 const $pageTitle = document.getElementById('page-title')
 
 // Titre/en-tête dynamiques selon le mode choisi — l'app n'est plus limitée au CD depuis
@@ -23,6 +24,9 @@ function updatePageTitle() {
   const icon = appMode === 'cd' ? '📀' : appMode === 'files' ? '📁' : '📥'
   document.title = `RadioStation — ${label}`
   if ($pageTitle) $pageTitle.textContent = `${icon} ${label}`
+  // "Rip rapide" (cdparanoia -Z) ne concerne que la lecture physique d'un CD — masqué hors
+  // du mode CD (sélecteur de mode, import fichiers) où il n'a aucun effet.
+  if ($fastRipLabel) $fastRipLabel.style.display = appMode === 'cd' ? '' : 'none'
 }
 
 let settings = {}

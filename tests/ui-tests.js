@@ -60,12 +60,15 @@ async function waitUp(url, ms = 8000) {
   check('UI: indicateur "Connecté à"', pairing.includes('Connecté à'), pairing);
   await page.waitForSelector('#btn-mode-files', { timeout: 5000 });
   check('UI: sélecteur de mode affiché', true);
+  // "Rip rapide" ne concerne que la lecture physique d'un CD → masqué au sélecteur de mode.
+  check('UI: "Rip rapide" masqué hors mode CD (sélecteur de mode)', !(await page.isVisible('#fast-rip-label')));
 
   // Mode CD : écran "Aucun disque" (pas de CD sur ce Pi), bouton désactivé, retour
   await page.click('#btn-mode-cd');
   await page.waitForSelector('#btn-toc', { timeout: 8000 });
   const tocDisabled = await page.$eval('#btn-toc', el => el.disabled);
   check('UI CD: sans CD → bouton pistes désactivé', tocDisabled === true);
+  check('UI CD: "Rip rapide" visible en mode CD', await page.isVisible('#fast-rip-label'));
   await page.click('#btn-back-mode');
   await page.waitForSelector('#btn-mode-files', { timeout: 5000 });
   check('UI CD: retour sélecteur de mode', true);
@@ -73,6 +76,7 @@ async function waitUp(url, ms = 8000) {
   // Mode fichiers : upload via input
   await page.click('#btn-mode-files');
   await page.waitForSelector('#files-input', { timeout: 5000, state: 'attached' });
+  check('UI fichiers: "Rip rapide" masqué en mode fichiers', !(await page.isVisible('#fast-rip-label')));
   await page.setInputFiles('#files-input', path.join(SCRATCH, '.tmp', 'fixtures', 'Artist One - Nice Song.wav'));
 
   // Écran d'édition : waveform + résumé
