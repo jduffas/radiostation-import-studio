@@ -637,7 +637,10 @@ function setupTrimWaveform(previewUrl, onReady) {
 
   wavesurfer.on('timeupdate', (t) => {
     document.getElementById('time-display').textContent = `${formatTime(t)} / ${formatTime(wavesurfer.getDuration())}`
-    if (trimMarkers?.volumePoints.length) updatePreviewVolume(t)
+    // Toujours appelée (pas seulement si volumePoints.length) : sinon un fondu réglé sans
+    // courbe de volume ne s'entendait jamais à la lecture — se réduit naturellement au
+    // volume de base quand ni fondu ni courbe ne sont actifs (gains à 1.0).
+    updatePreviewVolume(t)
   })
 
   regions.on('region-updated', onRegionMoved)
@@ -1025,13 +1028,23 @@ function renderModePanel() {
   document.getElementById('fade-in-s').onchange = (e) => {
     trimMarkers.fadeInMs = Math.max(0, Math.min(30, Number(e.target.value) || 0)) * 1000
     renderFadeOverlay()
+    updatePreviewVolume(wavesurfer?.getCurrentTime() || 0)
   }
   document.getElementById('fade-out-s').onchange = (e) => {
     trimMarkers.fadeOutMs = Math.max(0, Math.min(30, Number(e.target.value) || 0)) * 1000
     renderFadeOverlay()
+    updatePreviewVolume(wavesurfer?.getCurrentTime() || 0)
   }
-  document.getElementById('fade-in-curve').onchange = (e) => { trimMarkers.fadeInCurve = e.target.value; renderFadeOverlay() }
-  document.getElementById('fade-out-curve').onchange = (e) => { trimMarkers.fadeOutCurve = e.target.value; renderFadeOverlay() }
+  document.getElementById('fade-in-curve').onchange = (e) => {
+    trimMarkers.fadeInCurve = e.target.value
+    renderFadeOverlay()
+    updatePreviewVolume(wavesurfer?.getCurrentTime() || 0)
+  }
+  document.getElementById('fade-out-curve').onchange = (e) => {
+    trimMarkers.fadeOutCurve = e.target.value
+    renderFadeOverlay()
+    updatePreviewVolume(wavesurfer?.getCurrentTime() || 0)
+  }
 }
 
 function updateOverlayInfo() {
@@ -1128,8 +1141,24 @@ function volumeGainAt(tMs) {
   return 1.0
 }
 
+// Gain du fondu d'entrée/sortie au temps donné (s) — 1.0 hors zone de fondu. Réutilise
+// fadeGainAt/FADE_CURVE_FN (définis plus bas, déclarations hoistées) : même formule que
+// le tracé pointillé de renderFadeOverlay, pour que ce qu'on entend corresponde à ce
+// qu'on voit.
+function fadeGainAtSeconds(tSeconds) {
+  if (!trimMarkers) return 1.0
+  const fadeInS = trimMarkers.fadeInMs / 1000
+  if (fadeInS > 0 && tSeconds < fadeInS) return fadeGainAt(trimMarkers.fadeInCurve, tSeconds / fadeInS)
+  const fadeOutS = trimMarkers.fadeOutMs / 1000
+  const dur = wavesurfer?.getDuration() || 0
+  if (fadeOutS > 0 && tSeconds > dur - fadeOutS) return fadeGainAt(trimMarkers.fadeOutCurve, (dur - tSeconds) / fadeOutS)
+  return 1.0
+}
+
 // Volume de lecture effectif = slider global (dB, plafonné à 1) × courbe normalisée par
-// son max (les gains > 0 dB ne sont pas prévisualisables, volume média plafonné).
+// son max (les gains > 0 dB ne sont pas prévisualisables, volume média plafonné) × fondu
+// d'entrée/sortie. Sans ce dernier facteur, on réglait un fondu « à l'aveugle » (symptôme
+// signalé : aucun rendu audio avant Enregistrer, contrairement à la courbe de volume).
 function updatePreviewVolume(tSeconds) {
   if (!wavesurfer || !trimMarkers) return
   let v = Math.min(1, Math.pow(10, (trimMarkers.volumeDb || 0) / 20))
@@ -1137,6 +1166,7 @@ function updatePreviewVolume(tSeconds) {
     const maxGain = Math.max(1, ...trimMarkers.volumePoints.map(p => volDbToLinear(p.db)))
     v *= Math.min(1, volumeGainAt(tSeconds * 1000) / maxGain)
   }
+  v *= fadeGainAtSeconds(tSeconds)
   wavesurfer.setVolume(Math.max(0, Math.min(1, v)))
 }
 
@@ -1378,6 +1408,7 @@ function renderFadeOverlay() {
         }
         renderFadeOverlay()
         syncFadeInputs()
+        updatePreviewVolume(wavesurfer?.getCurrentTime() || 0)
       }
       const onUp = () => {
         fadeDragging = null

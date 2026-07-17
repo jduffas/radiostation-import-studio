@@ -163,6 +163,20 @@ async function waitUp(url, ms = 8000) {
   check('UI fichiers: poignée de fondu d\'entrée modifie #fade-in-s', fadeInAfter > fadeInBefore, `${fadeInBefore} → ${fadeInAfter}`);
   check('UI fichiers: poignées de fondu sans erreur JS', pageErrors.length === 0, pageErrors.join(' ; '));
 
+  // Aperçu AUDIO du fondu (pas seulement visuel) : lecture depuis le début, dans la zone de
+  // fondu, doit être audiblement atténuée — sinon on règle "à l'aveugle" (bug signalé, même
+  // correction que côté site : cf. useDestructiveEdit.ts::fadeGainAtTime).
+  await page.fill('#fade-in-s', '5');
+  await page.$eval('#fade-in-s', el => el.dispatchEvent(new Event('change')));
+  await page.evaluate(() => { const a = document.querySelector('#waveform audio'); if (a) a.currentTime = 0; });
+  await page.click('#btn-playpause');
+  await sleep(600);
+  const fadeVolAtStart = await page.$eval('#waveform audio', el => el.volume);
+  console.log(`      (info) volume audio ~0.6s après lecture (fondu 5s sur piste 10s) = ${fadeVolAtStart.toFixed(3)}`);
+  check('UI fichiers: fondu d\'entrée audible (volume atténué en début de lecture)', fadeVolAtStart < 0.7, String(fadeVolAtStart));
+  await page.click('#btn-stop');
+  await sleep(200);
+
   await page.click('.mode-tab[data-mode="cue"]');
   check('UI fichiers: modes sans erreur JS', pageErrors.length === 0, pageErrors.join(' ; '));
 
