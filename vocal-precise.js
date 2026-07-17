@@ -255,7 +255,16 @@ function _decode(ffmpegPath, file) {
 }
 
 // ── Segmentation de la courbe vocale (pure, testée unitairement) ─────────────
-// frames : [{t_ms, mix_db, voc_db}] — retourne les zones sans voix triées.
+// frames : [{t_ms, mix_db, voc_db, band_db?, flux?}] — retourne les zones sans
+// voix triées par SCORE de qualité (étape 2 du plan) :
+//   score = durée × clarté × calme
+//   - clarté : bande vocale 300-3500 Hz du mix dégagée par rapport au reste du
+//     titre → un jingle parlé restera intelligible (densité spectrale) ;
+//   - calme : peu de flux spectral (attaques, fills de batterie) dans la zone
+//     (événements musicaux).
+// Les deux facteurs sont bornés (±35 % / ±15 %) : la durée reste dominante, une
+// zone nettement plus longue n'est jamais battue par une zone courte mais calme.
+// band_db/flux sont optionnels (compat : facteurs neutres si absents).
 function segmentVocalCurve(frames, totalMs) {
   if (frames.length < 40) return [];
   // Lissage de voc − mix
@@ -293,6 +302,8 @@ function segmentVocalCurve(frames, totalMs) {
           start_ms: s, end_ms: e, duration_ms: e - s,
           avg_rms_db: Math.round(avgRel * 10) / 10, // énergie vocale relative (dB) — plus c'est bas, plus la zone est sûre
           kind: avgMix < medMix - 10 ? 'quiet' : 'bridge',
+          _band: _median(zw.map(w => w.band_db).filter(Number.isFinite)),
+          _flux: _median(zw.map(w => w.flux).filter(Number.isFinite)),
         });
       }
       i = j + 1;
@@ -300,6 +311,7 @@ function segmentVocalCurve(frames, totalMs) {
       i++;
     }
   }
+
 
   // Règles de bord identiques au mode rapide : petite zone de bord jetée, longue
   // zone pénétrant ≥ KEEP_MS vers l'intérieur tronquée à la marge.
@@ -314,8 +326,31 @@ function segmentVocalCurve(frames, totalMs) {
     }
     inside.push(z);
   }
-  inside.sort((a, b) => b.duration_ms - a.duration_ms);
+
+  // Score de qualité (médianes de référence = frames actives du titre), calculé
+  // sur la durée FINALE (après troncature de bord)
+  const act = frames.filter(w => w.mix_db > activeMixThr);
+  const medBand = _median(act.map(w => w.band_db).filter(Number.isFinite));
+  const medFlux = _median(act.map(w => w.flux).filter(Number.isFinite));
+  for (const z of inside) {
+    const clarity = (z._band !== null && z._band !== undefined && medBand !== null)
+      ? 1 + Math.max(-0.35, Math.min(0.35, (medBand - z._band) / 12))
+      : 1;
+    const calm = (z._flux !== null && z._flux !== undefined && medFlux !== null && medFlux > 0)
+      ? 1 + 0.15 * Math.max(-1, Math.min(1, (medFlux - z._flux) / medFlux))
+      : 1;
+    z.score = Math.round(z.duration_ms * clarity * calm);
+    delete z._band; delete z._flux;
+  }
+
+  inside.sort((a, b) => (b.score ?? b.duration_ms) - (a.score ?? a.duration_ms));
   return inside.slice(0, 5);
+}
+
+function _median(vals) {
+  if (!vals.length) return null;
+  const s = [...vals].sort((a, b) => a - b);
+  return s[Math.floor(s.length / 2)];
 }
 
 // ── Session ORT (cachée entre titres d'un même rip) ──────────────────────────
@@ -377,6 +412,12 @@ async function analyzePrecise(wavPath, durationMs, level, ffmpegPath, settingsDi
   // des chunks successifs sont exactement contiguës. Dernier chunk paddé de zéros.
   const STEP = HOP * (DIM_T / 2); // 128 frames
   const frames = [];
+  // Bins de la bande vocale du MIX (densité spectrale, étape 2) : 300-3500 Hz
+  const HZ_PER_BIN = SAMPLE_RATE / N_FFT;
+  const BAND_LO = Math.round(300 / HZ_PER_BIN), BAND_HI = Math.min(DIM_F, Math.round(3500 / HZ_PER_BIN));
+  // Flux spectral (attaques/fills) : magnitudes du mix de la frame précédente —
+  // les frames gardées étant contiguës dans le temps, prevMag traverse les chunks.
+  let mag = new Float64Array(DIM_F), prevMag = new Float64Array(DIM_F), hasPrev = false;
   const nChunks = Math.max(1, Math.ceil(nS / STEP) - 1);
   for (let c = 0; c < nChunks; c++) {
     const off = c * STEP;
@@ -400,17 +441,27 @@ async function analyzePrecise(wavPath, durationMs, level, ffmpegPath, settingsDi
     for (let t = tFrom; t < tTo; t++) {
       const t_ms = (off + t * HOP) / SAMPLE_RATE * 1000;
       if (frames.length && t_ms <= frames[frames.length - 1].t_ms) continue; // recouvrement
-      let eMix = 0, eVoc = 0;
+      let eMix = 0, eVoc = 0, eBand = 0, fluxNum = 0, magSum = 0;
       for (let f = 0; f < DIM_F; f++) {
         const i0 = f * DIM_T + t;
-        eMix += data[i0] ** 2 + data[plane + i0] ** 2 + data[2 * plane + i0] ** 2 + data[3 * plane + i0] ** 2;
+        const e = data[i0] ** 2 + data[plane + i0] ** 2 + data[2 * plane + i0] ** 2 + data[3 * plane + i0] ** 2;
+        eMix += e;
+        if (f >= BAND_LO && f < BAND_HI) eBand += e;
         eVoc += out[i0] ** 2 + out[plane + i0] ** 2 + out[2 * plane + i0] ** 2 + out[3 * plane + i0] ** 2;
+        const m = Math.sqrt(data[i0] ** 2 + data[plane + i0] ** 2) + Math.sqrt(data[2 * plane + i0] ** 2 + data[3 * plane + i0] ** 2);
+        mag[f] = m;
+        magSum += m;
+        if (hasPrev) { const d = m - prevMag[f]; if (d > 0) fluxNum += d; }
       }
       frames.push({
         t_ms,
         mix_db: 10 * Math.log10(eMix + 1e-10),
         voc_db: 10 * Math.log10(eVoc + 1e-10),
+        band_db: 10 * Math.log10(eBand + 1e-10),
+        // Flux spectral relatif (0..~1) : part d'énergie nouvelle dans la frame
+        flux: hasPrev && magSum > 0 ? fluxNum / magSum : 0,
       });
+      const tmp = prevMag; prevMag = mag; mag = tmp; hasPrev = true;
     }
   }
   const zones = segmentVocalCurve(frames, totalMs);

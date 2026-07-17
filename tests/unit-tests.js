@@ -148,6 +148,26 @@ TOTAL   46442 [10:19.17]    (audio only)
   check('segmentVocalCurve: instrumental complet → 1 zone tronquée aux bords',
     zsN.length === 1 && zsN[0].start_ms === 5000 && zsN[0].end_ms === 55000, JSON.stringify(zsN));
 
+  // ---- Score de qualité (étape 2 : densité spectrale / calme) ----
+  // Zone A 20-31s (11s, bande vocale chargée = médiane), zone B 36-46s (10s, bande
+  // dégagée de 12 dB) : la clarté (bornée +35%) doit faire passer B devant A.
+  const frQ = [];
+  for (let t = 0; t < 60000; t += 23.2) {
+    const inA = t >= 20000 && t < 31000, inB = t >= 36000 && t < 46000;
+    frQ.push({
+      t_ms: t, mix_db: 60,
+      voc_db: (inA || inB) ? 38 : 52,
+      band_db: inB ? 40 : 52,
+      flux: 0.2,
+    });
+  }
+  const zsQ = VP.segmentVocalCurve(frQ, 60000);
+  check('score: 2 zones détectées', zsQ.length === 2, JSON.stringify(zsQ));
+  check('score: chaque zone expose un score numérique', zsQ.every(z => typeof z.score === 'number' && z.score > 0), JSON.stringify(zsQ));
+  check('score: la zone plus courte mais dégagée (36-46s) passe devant',
+    zsQ.length === 2 && zsQ[0].start_ms > 35000 && zsQ[0].start_ms < 37000, JSON.stringify(zsQ.map(z => [z.start_ms, z.score])));
+  check('vocalZones (rapide): zones scorées', zones.every(z => typeof z.score === 'number' && z.score > 0), JSON.stringify(zones));
+
   // ---- detectEnergyFromMean ----
   check('energy: -5→5, -10→4, -16→3, -22→2, -30→1, null→null',
     M.detectEnergyFromMean(-5) === 5 && M.detectEnergyFromMean(-10) === 4 && M.detectEnergyFromMean(-16) === 3 &&

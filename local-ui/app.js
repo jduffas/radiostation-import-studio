@@ -1563,7 +1563,9 @@ function bestVocalZone(zones, durationSeconds) {
     return mid > durMs * 0.10 && mid < durMs * 0.90
   })
   const pool = central.length ? central : zones
-  return pool.reduce((best, z) => ((z.duration_ms || 0) > (best?.duration_ms || 0) ? z : best), null)
+  // Meilleure zone = score de qualité (durée × clarté × calme) si présent, sinon durée
+  const rank = z => (z?.score ?? z?.duration_ms) || 0
+  return pool.reduce((best, z) => (rank(z) > rank(best) ? z : best), null)
 }
 
 function applyBestVocalZone(markTouched) {

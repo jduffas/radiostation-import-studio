@@ -435,7 +435,18 @@ function _computeVocalZones(lowOutput, highOutput, vocOutput, totalDurationMs) {
     }
     inside.push(z);
   }
-  inside.sort((a, b) => b.duration_ms - a.duration_ms);
+
+  // Score de qualité (étape 2 — densité spectrale) : clarté = bande vocale du mix
+  // dégagée par rapport au reste du titre (un jingle parlé y reste intelligible).
+  // avg_rms_db est déjà la RMS bande 300-3500 Hz de la zone ; référence = médiane
+  // des fenêtres actives (= quietThr + 10). Facteur borné à ±35 % : la durée reste
+  // dominante. Le moteur précis (vocal-precise.js) fait pareil + calme transitoire.
+  const medBandRef = quietThr + 10;
+  for (const z of inside) {
+    const clarity = 1 + Math.max(-0.35, Math.min(0.35, (medBandRef - z.avg_rms_db) / 12));
+    z.score = Math.round(z.duration_ms * clarity);
+  }
+  inside.sort((a, b) => (b.score ?? b.duration_ms) - (a.score ?? a.duration_ms));
 
   return inside.slice(0, 5);
 }
