@@ -101,20 +101,30 @@ TOTAL   46442 [10:19.17]    (audio only)
   check('multipart: champ texte', parts.find(x => x.name === 'note')?.data.toString() === 'hello');
   check('multipart: boundary manquant → []', M.parseMultipart(Buffer.from('x'), 'text/plain').length === 0);
 
-  // ---- _parseAstats / _computeVocalZones ----
-  // 20 fenêtres de 500ms : actives à -20dB sauf fenêtres 4-9 (2000-4500ms) calmes à -45dB
-  let astats = '';
+  // ---- _parseAstats / _computeVocalZones (v2 : deux sous-bandes low/high) ----
+  // 20 fenêtres de 500ms sur 10s :
+  //   fenêtres 4-9   (2000-5000ms) : calmes (-45/-51) → zone kind=quiet
+  //   fenêtres 13-18 (6500-9500ms) : pont brillant plein volume, tilt inversé (-26/-16)
+  //                                  → PAS calme, zone kind=bridge via tilt spectral
+  //   ailleurs : « voix » (-20/-26, tilt +6)
+  let astatsLow = '', astatsHigh = '';
   for (let i = 0; i < 20; i++) {
     const t = (i * 0.5).toFixed(2);
-    const rms = (i >= 4 && i <= 9) ? -45 : -20;
-    astats += `frame:${i} pts:${i * 22050} pts_time:${t}\nlavfi.astats.Overall.RMS_level=${rms}.000000\n`;
+    let lo = -20, hi = -26;
+    if (i >= 4 && i <= 9) { lo = -45; hi = -51; }
+    if (i >= 13 && i <= 18) { lo = -26; hi = -16; }
+    astatsLow += `frame:${i} pts:${i * 22050} pts_time:${t}\nlavfi.astats.Overall.RMS_level=${lo}.000000\n`;
+    astatsHigh += `frame:${i} pts:${i * 22050} pts_time:${t}\nlavfi.astats.Overall.RMS_level=${hi}.000000\n`;
   }
-  const wins = M._parseAstats(astats);
+  const wins = M._parseAstats(astatsLow);
   check('astats: 20 fenêtres parsées', wins.length === 20, String(wins.length));
-  const zones = M._computeVocalZones(astats, 10000);
-  check('vocalZones: 1 zone détectée', zones.length === 1, JSON.stringify(zones));
-  check('vocalZones: zone ≈ 2000-5000ms', zones.length === 1 && zones[0].start_ms === 2000 && zones[0].end_ms === 5000, JSON.stringify(zones[0]));
-  check('vocalZones: -inf géré', M._parseAstats('pts_time:0.0\nlavfi.astats.Overall.RMS_level=-inf\n')[0].rms_db === -60);
+  const zones = M._computeVocalZones(astatsLow, astatsHigh, 10000);
+  check('vocalZones: 2 zones détectées', zones.length === 2, JSON.stringify(zones));
+  const zQuiet = zones.find(z => z.kind === 'quiet');
+  const zBridge = zones.find(z => z.kind === 'bridge');
+  check('vocalZones: zone calme ≈ 2000-5000ms', !!zQuiet && zQuiet.start_ms === 2000 && zQuiet.end_ms === 5000, JSON.stringify(zQuiet));
+  check('vocalZones: pont tilt ≈ 6500-9500ms', !!zBridge && zBridge.start_ms === 6500 && zBridge.end_ms === 9500, JSON.stringify(zBridge));
+  check('vocalZones: -inf géré', M._parseAstats('pts_time:0.0\nlavfi.astats.Overall.RMS_level=-inf\n')[0].rms_db === -90);
 
   // ---- detectEnergyFromMean ----
   check('energy: -5→5, -10→4, -16→3, -22→2, -30→1, null→null',

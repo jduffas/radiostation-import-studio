@@ -1537,8 +1537,14 @@ async function ensureVocalZones() {
 }
 
 function bestVocalZone(zones, durationSeconds) {
+  // Critère de centralité sur le MILIEU de la zone (pas ses bornes) : une longue zone
+  // légitime — ex. solo final — peut s'étendre près de la fin sans être écartée
+  // (l'analyse borne déjà les zones à 5s des bords de la piste).
   const durMs = Math.max(1, durationSeconds * 1000)
-  const central = zones.filter(z => (z.start_ms || 0) > durMs * 0.10 && (z.end_ms || 0) < durMs * 0.90)
+  const central = zones.filter(z => {
+    const mid = ((z.start_ms || 0) + (z.end_ms || 0)) / 2
+    return mid > durMs * 0.10 && mid < durMs * 0.90
+  })
   const pool = central.length ? central : zones
   return pool.reduce((best, z) => ((z.duration_ms || 0) > (best?.duration_ms || 0) ? z : best), null)
 }
