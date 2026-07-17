@@ -272,15 +272,16 @@ function _computeVocalZones(output, totalDurationMs) {
     zones.push({ start_ms: zStart, end_ms: Math.min(zEnd, total), duration_ms: zEnd - zStart, avg_rms_db: Math.round((sumRms / cnt) * 10) / 10 });
   }
 
-  // Score = durée × bonus intro/outro (premiers/derniers 20%)
-  zones.forEach(z => {
-    const rel = ((z.start_ms + z.end_ms) / 2) / total;
-    z._score = z.duration_ms * ((rel < 0.2 || rel > 0.8) ? 1.3 : 1.0);
-  });
-  zones.sort((a, b) => b._score - a._score);
-  zones.forEach(z => delete z._score);
+  // Zones touchant le tout début ou la toute fin de la piste : exclues. C'est le rôle de
+  // l'intro/de la transition (cue points) de gérer un jingle en tête/queue — une zone
+  // "jingle intérieur" qui tombe au début ou à la fin n'est plus "intérieure" et fait
+  // doublon avec ces cue points. Remplace l'ancien bonus ×1.3 sur les 20% premiers/
+  // derniers, qui proposait justement en priorité ces zones de bord (signalé comme un
+  // vrai défaut : l'analyse vocale ne doit jamais suggérer de silence de bord).
+  const inside = zones.filter(z => z.start_ms > 0 && z.end_ms < total);
+  inside.sort((a, b) => b.duration_ms - a.duration_ms);
 
-  return zones.slice(0, 5);
+  return inside.slice(0, 5);
 }
 
 // ============================================================

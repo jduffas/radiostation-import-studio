@@ -543,10 +543,13 @@ code {
 
 .fade-svg { position: absolute; inset: 0; width: 100%; height: 100%; display: block; overflow: visible; }
 
-.fade-fill { fill: rgba(74, 144, 226, 0.18); }
+/* #7ec8e3 (pas --blue) : --blue = #4a90e2 est EXACTEMENT waveColor de la waveform
+   (même teinte) → poignée/courbe invisibles, noyées dans les barres (signalé par
+   l'utilisateur). Même accent clair que FadeHandlesOverlay.vue du site. */
+.fade-fill { fill: rgba(126, 200, 227, 0.22); }
 .fade-dash {
   fill: none;
-  stroke: var(--blue);
+  stroke: #7ec8e3;
   stroke-width: 2;
   stroke-dasharray: 6 4;
   stroke-linecap: round;
@@ -555,7 +558,7 @@ code {
 .fade-handle-hit { cursor: ew-resize; pointer-events: all; }
 
 .fade-handle {
-  fill: var(--blue);
+  fill: #7ec8e3;
   stroke: #111;
   stroke-width: 2;
 }

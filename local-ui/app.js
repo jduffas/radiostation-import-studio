@@ -827,10 +827,12 @@ function wireEditorModeTabs() {
 
 // Change le mode actif SANS re-render global : la waveform (et ses régions) doit survivre
 // au changement de mode. Seuls le panneau bas et l'interactivité des régions changent —
-// les régions des autres modes restent visibles mais ni saisissables ni cliquables
-// (pointerEvents:'none', pour que la sélection à la souris du mode montage et le clic-seek
-// passent au travers ; le drag d'une région préventDefault les pointermove du document,
-// ce qui bloquerait enableDragSelection même drag désactivé).
+// les régions des autres modes sont MASQUÉES (display:none), pas seulement rendues non
+// cliquables : les laisser visibles (ancien comportement) laissait aussi leurs étiquettes
+// et poignées (hitbox élargie des marqueurs DÉBUT/INTRO/TRANSITION) intercepter le drag
+// des contrôles du mode actif — signalé : « on ne peut plus rien attraper » en changeant
+// de mode. Le clic-seek et la sélection à la souris du mode montage passent au travers
+// d'une région masquée de toute façon (display:none = hors du rendu ET du hit-test).
 function setEditorMode(mode) {
   if (!trimMarkers) return
   trimMarkers.mode = mode
@@ -841,7 +843,10 @@ function setEditorMode(mode) {
     const opts = { drag: active }
     if (withResize) opts.resize = active
     region.setOptions(opts)
-    if (region.element) region.element.style.pointerEvents = active ? 'all' : 'none'
+    if (region.element) {
+      region.element.style.pointerEvents = active ? 'all' : 'none'
+      region.element.style.display = active ? '' : 'none'
+    }
   }
   setActive(trimMarkers.keepRegion, mode === 'cue', true)
   setActive(trimMarkers.cueInRegion, mode === 'cue', false)

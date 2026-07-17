@@ -120,6 +120,12 @@ async function waitUp(url, ms = 8000) {
   // Éditeur unifié (v1.7) : bascule entre les 4 modes sans erreur JS, panneaux rendus
   await page.click('.mode-tab[data-mode="jingle"]');
   await page.waitForSelector('#btn-overlay-add', { timeout: 5000 });
+  // Étiquettes du mode cue points (DÉBUT/INTRO/TRANSITION) masquées en mode jingle — sinon
+  // leur hitbox élargie interceptait le drag de la zone jingle (signalé : "on ne peut plus
+  // rien attraper" en changeant de mode).
+  check('UI fichiers: étiquette DÉBUT masquée en mode jingle', !(await page.isVisible('#waveform [part~="cue-in"]')));
+  check('UI fichiers: étiquette INTRO masquée en mode jingle', !(await page.isVisible('#waveform [part~="intro-end"]')));
+  check('UI fichiers: étiquette TRANSITION masquée en mode jingle', !(await page.isVisible('#waveform [part~="cue-out"]')));
   // Attendre la fin de l'analyse vocale à la demande (le panneau se re-rend à la fin —
   // cliquer pendant l'analyse risquerait un élément détaché)
   await page.waitForFunction(() => {
@@ -162,6 +168,10 @@ async function waitUp(url, ms = 8000) {
   const fadeInAfter = Number(await page.$eval('#fade-in-s', el => el.value));
   check('UI fichiers: poignée de fondu d\'entrée modifie #fade-in-s', fadeInAfter > fadeInBefore, `${fadeInBefore} → ${fadeInAfter}`);
   check('UI fichiers: poignées de fondu sans erreur JS', pageErrors.length === 0, pageErrors.join(' ; '));
+  // Couleur distincte de la waveform (signalé : poignées invisibles, noyées dans les barres
+  // bleues #4a90e2 avant ce fix — cf. .fade-handle de style.css).
+  const fadeHandleColor = await page.locator('.fade-handle').first().evaluate(el => getComputedStyle(el).fill);
+  check('UI fichiers: poignée de fondu visible (couleur ≠ waveform)', fadeHandleColor !== 'rgb(74, 144, 226)', fadeHandleColor);
 
   // Aperçu AUDIO du fondu (pas seulement visuel) : lecture depuis le début, dans la zone de
   // fondu, doit être audiblement atténuée — sinon on règle "à l'aveugle" (bug signalé, même
@@ -176,6 +186,7 @@ async function waitUp(url, ms = 8000) {
   check('UI fichiers: fondu d\'entrée audible (volume atténué en début de lecture)', fadeVolAtStart < 0.7, String(fadeVolAtStart));
   await page.click('#btn-stop');
   await sleep(200);
+  if (process.env.SHOT_DIR) await page.screenshot({ path: path.join(process.env.SHOT_DIR, 'import-studio-fade-handles-debug.png') });
 
   await page.click('.mode-tab[data-mode="cue"]');
   check('UI fichiers: modes sans erreur JS', pageErrors.length === 0, pageErrors.join(' ; '));
