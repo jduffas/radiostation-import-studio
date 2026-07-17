@@ -637,6 +637,20 @@ function setupTrimWaveform(previewUrl, onReady) {
   regions.on('region-updated', onRegionMoved)
   regions.on('region-update', onRegionMoved)
 
+  // Aperçu du montage à la lecture : si le curseur atteint une zone de coupe pendant la
+  // lecture, saute directement à sa fin et continue — sinon on entend le passage qu'on va
+  // couper avant même de valider (« couper à l'aveugle », signalé). Pas de saut sur un seek
+  // manuel qui atterrit dans la zone : on doit pouvoir la consulter.
+  regions.on('region-in', (region) => {
+    if (wavesurfer?.isPlaying() && trimMarkers?.cuts.some(c => c.region === region)) {
+      // +0.02s : setTime(region.end) pile sur la borne réenclenche region-in en boucle
+      // (comparaison interne inclusive de wavesurfer.js) → RangeError pile de récursion
+      // synchrone, reproduit et confirmé côté site. Décalage imperceptible qui sort sans
+      // ambiguïté de la zone.
+      wavesurfer.setTime(Math.min(wavesurfer.getDuration(), region.end + 0.02))
+    }
+  })
+
   document.getElementById('btn-playpause').onclick = () => wavesurfer.playPause()
   document.getElementById('btn-stop').onclick = () => wavesurfer.stop()
   document.getElementById('btn-zoom-in').onclick = () => applyZoom(waveZoom.level * 2)

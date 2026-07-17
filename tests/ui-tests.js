@@ -149,6 +149,30 @@ async function waitUp(url, ms = 8000) {
   await page.waitForSelector('#cut-list', { timeout: 5000 });
   check('UI fichiers: mode montage, liste vide', (await page.textContent('#cut-list')).includes('Aucune coupe'));
   check('UI fichiers: bouton détection silences absent en mode montage', !(await page.isVisible('#btn-auto-cue')));
+
+  // Aperçu du montage à la lecture (signalé : ne pas couper à l'aveugle) — coupe de 3s à
+  // 5s sur une piste de 10s, seek à 2.5s, lecture : le curseur doit sauter directement à la
+  // fin de la coupe en l'atteignant, pas y rester/s'y arrêter.
+  const waveBox = await page.locator('#waveform').boundingBox();
+  const cutX1 = waveBox.x + waveBox.width * 0.30, cutX2 = waveBox.x + waveBox.width * 0.50;
+  const cutY = waveBox.y + waveBox.height * 0.5;
+  await page.mouse.move(cutX1, cutY);
+  await page.mouse.down();
+  await page.mouse.move(cutX2, cutY, { steps: 10 });
+  await page.mouse.up();
+  await sleep(300);
+  check('UI fichiers: coupe créée (drag-selection)', !(await page.textContent('#cut-list')).includes('Aucune coupe'));
+  await page.$eval('#waveform audio', el => { el.currentTime = 2.5; });
+  await page.click('#btn-playpause');
+  await sleep(2500);
+  const timeAfterCut = await page.$eval('#waveform audio', el => el.currentTime);
+  await page.click('#btn-stop');
+  console.log(`      (info) coupe≈[3s,5s], seek=2.5s, après 2.5s de lecture: ${timeAfterCut.toFixed(2)}s`);
+  check('UI fichiers: aperçu montage — le curseur a sauté hors de la zone de coupe', timeAfterCut < 3 || timeAfterCut >= 5, `${timeAfterCut.toFixed(2)}s`);
+  check('UI fichiers: aperçu montage sans erreur JS', pageErrors.length === 0, pageErrors.join(' ; '));
+  // Nettoyage : retirer la coupe créée pour ne pas perturber les vérifs suivantes (compteur
+  // "0" attendu par mode-panel plus loin n'existe pas ici, mais reset() est plus sûr).
+  await page.click('#btn-reset');
   await page.click('.mode-tab[data-mode="volume"]');
   await page.waitForSelector('#vol-slider', { timeout: 5000 });
   check('UI fichiers: bouton détection silences absent en mode volume', !(await page.isVisible('#btn-auto-cue')));
