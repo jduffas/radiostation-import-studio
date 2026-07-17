@@ -13,6 +13,7 @@ const $app = document.getElementById('app')
 const $pairingIndicator = document.getElementById('pairing-indicator')
 const $vocalToggle = document.getElementById('vocal-toggle')
 const $vocalToggleLabel = document.getElementById('vocal-toggle-label')
+const $vocalLevel = document.getElementById('vocal-level')
 const $fastRipToggle = document.getElementById('fast-rip-toggle')
 const $fastRipLabel = document.getElementById('fast-rip-label')
 const $pageTitle = document.getElementById('page-title')
@@ -120,6 +121,7 @@ async function init() {
   }
   updatePairingIndicator()
   $vocalToggle.checked = !!settings.vocal_analysis_enabled
+  $vocalLevel.value = settings.vocal_analysis_level || 'fast'
   $fastRipToggle.checked = !!settings.fast_rip_enabled
   if (!settings.server_url || !settings.device_token) {
     stopPolling()
@@ -195,6 +197,21 @@ $fastRipToggle.onchange = async () => {
     })
   } catch (e) {
     $fastRipToggle.checked = !enabled // revert
+    alert("Impossible de sauvegarder le réglage : " + e.message)
+  }
+}
+
+$vocalLevel.onchange = async () => {
+  const level = $vocalLevel.value
+  try {
+    settings = await api('/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ vocal_analysis_level: level }),
+    })
+    if ((settings.vocal_analysis_level || 'fast') !== level) throw new Error('valeur refusée')
+  } catch (e) {
+    $vocalLevel.value = settings.vocal_analysis_level || 'fast' // revert
     alert("Impossible de sauvegarder le réglage : " + e.message)
   }
 }

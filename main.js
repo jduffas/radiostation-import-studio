@@ -116,7 +116,7 @@ function loadSettings() {
     try {
       return JSON.parse(fs.readFileSync(LEGACY_SETTINGS_PATH, 'utf8'));
     } catch {
-      return { vocal_analysis_enabled: false, fast_rip_enabled: false };
+      return { vocal_analysis_enabled: false, fast_rip_enabled: false, vocal_analysis_level: 'fast' };
     }
   }
 }
@@ -170,7 +170,32 @@ function saveSettings(updates) {
  */
 const VOCAL_MODEL_SRC = path.join(__dirname, 'models', 'bd.rnnn');
 
+/**
+ * Point d'entrée de l'analyse : aiguillage selon le réglage utilisateur
+ * `vocal_analysis_level` — le NIVEAU de performance (et donc d'usage CPU)
+ * appartient à l'utilisateur :
+ *   'fast' (défaut) : moteur ffmpeg ci-dessous (~2 s/titre) ;
+ *   'precise' / 'precise_eco' : séparation de sources MDX-Net (vocal-precise.js,
+ *     ~1-3 min/titre sur un poste de bureau, éco = moitié des cœurs), modèle
+ *     ~64 Mo téléchargé au premier usage. Tout échec (plateforme sans
+ *     onnxruntime, pas de réseau…) retombe silencieusement sur le mode rapide.
+ */
 async function analyzeVocalZones(wavPath, durationMs) {
+  const level = loadSettings().vocal_analysis_level || 'fast';
+  if (level === 'precise' || level === 'precise_eco') {
+    try {
+      const precise = require('./vocal-precise');
+      const zones = await precise.analyzePrecise(wavPath, durationMs, level, FFMPEG, SETTINGS_DIR);
+      if (zones) return zones;
+      console.warn('[analyzeVocalZones] moteur précis indisponible → repli sur le mode rapide');
+    } catch (e) {
+      console.warn('[analyzeVocalZones] échec du moteur précis → repli sur le mode rapide:', e.message);
+    }
+  }
+  return _analyzeVocalZonesFast(wavPath, durationMs);
+}
+
+async function _analyzeVocalZonesFast(wavPath, durationMs) {
   return new Promise((resolve) => {
     let workDir;
     try {
@@ -2306,6 +2331,7 @@ const server = http.createServer(async (req, res) => {
       // server_url/device_token après un appairage (Phase 2c) — pas seulement vocal_analysis_enabled.
       const updates = {};
       if (payload.vocal_analysis_enabled !== undefined) updates.vocal_analysis_enabled = !!payload.vocal_analysis_enabled;
+      if (payload.vocal_analysis_level !== undefined && ['fast', 'precise', 'precise_eco'].includes(payload.vocal_analysis_level)) updates.vocal_analysis_level = payload.vocal_analysis_level;
       if (payload.fast_rip_enabled !== undefined) updates.fast_rip_enabled = !!payload.fast_rip_enabled;
       if (payload.server_url !== undefined) updates.server_url = String(payload.server_url);
       if (payload.device_token !== undefined) updates.device_token = String(payload.device_token);

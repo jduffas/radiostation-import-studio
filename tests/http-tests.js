@@ -94,6 +94,13 @@ async function j(url, opts) {
   check('GET /settings défauts', s.status === 200 && s.body.vocal_analysis_enabled === false && s.body.fast_rip_enabled === false, JSON.stringify(s.body));
   s = await j(`${BASE}/settings`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ vocal_analysis_enabled: 'yes', ignored_key: 123 }) });
   check('POST /settings coercition bool + clé inconnue ignorée', s.body.vocal_analysis_enabled === true && s.body.ignored_key === undefined, JSON.stringify(s.body));
+  s = await j(`${BASE}/settings`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ vocal_analysis_level: 'precise_eco' }) });
+  check('POST /settings niveau analyse accepté', s.body.vocal_analysis_level === 'precise_eco', JSON.stringify(s.body));
+  s = await j(`${BASE}/settings`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ vocal_analysis_level: 'turbo' }) });
+  check('POST /settings niveau invalide ignoré', s.body.vocal_analysis_level === 'precise_eco', JSON.stringify(s.body));
+  // Retour à 'fast' : les tests d'analyse vocale de la suite doivent rester sur le moteur rapide
+  s = await j(`${BASE}/settings`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ vocal_analysis_level: 'fast' }) });
+  check('POST /settings retour niveau fast', s.body.vocal_analysis_level === 'fast', JSON.stringify(s.body));
   const settingsFile = path.join(HOME, '.radiostation-import-studio', 'settings.json');
   check('settings.json persisté en sandbox', fs.existsSync(settingsFile));
   // repli legacy : settings dans l'ancien dossier lus si le nouveau est absent

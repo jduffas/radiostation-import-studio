@@ -41,6 +41,7 @@ Remove-Item $NodeZip, (Join-Path $env:TEMP $NodePkg) -Recurse -Force -ErrorActio
 # ── 3. main.js + dépendances prod ─────────────────────────────────────────────
 Write-Host "→ Installation dépendances Node production..."
 Copy-Item (Join-Path $RootDir "main.js") -Destination $WinDir
+Copy-Item (Join-Path $RootDir "vocal-precise.js") -Destination $WinDir
 Copy-Item (Join-Path $RootDir "package.json") -Destination $WinDir
 Copy-Item (Join-Path $RootDir "local-ui") -Destination $WinDir -Recurse
 Copy-Item (Join-Path $RootDir "models") -Destination $WinDir -Recurse
@@ -48,6 +49,15 @@ Push-Location $RootDir
 npm ci --omit=dev --silent 2>&1 | Out-Null
 Pop-Location
 Copy-Item (Join-Path $RootDir "node_modules") -Destination $WinDir -Recurse
+
+# onnxruntime-node (analyse vocale précise) embarque les binaires de TOUTES les
+# plateformes (~260 Mo) : ne garder que win32/x64.
+$OrtBin = Join-Path $WinDir "node_modules\onnxruntime-node\bin\napi-v6"
+if (Test-Path $OrtBin) {
+    Get-ChildItem $OrtBin -Directory | Where-Object { $_.Name -ne "win32" } | Remove-Item -Recurse -Force
+    Get-ChildItem (Join-Path $OrtBin "win32") -Directory | Where-Object { $_.Name -ne "x64" } | Remove-Item -Recurse -Force
+    Write-Host "  onnxruntime élagué (win32/x64)"
+}
 
 # ── 3b. Extraction binaires ffmpeg/ffprobe + shims minimalistes ───────────────
 Write-Host "→ Extraction binaires ffmpeg/ffprobe (win32-x64)..."

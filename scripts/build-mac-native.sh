@@ -102,11 +102,21 @@ rm -rf "/tmp/$NODE_PKG" /tmp/node.tar.gz
 # ── 5. main.js + dépendances prod ─────────────────────────────────────────────
 echo "→ Installation dépendances production..."
 cp "$ROOT_DIR/main.js" "$APP_BUNDLE/Contents/Resources/"
+cp "$ROOT_DIR/vocal-precise.js" "$APP_BUNDLE/Contents/Resources/"
 cp "$ROOT_DIR/package.json" "$APP_BUNDLE/Contents/Resources/"
 cp -r "$ROOT_DIR/local-ui" "$APP_BUNDLE/Contents/Resources/"
 cp -r "$ROOT_DIR/models" "$APP_BUNDLE/Contents/Resources/"
 (cd "$ROOT_DIR" && npm ci --omit=dev --silent)
 cp -r "$ROOT_DIR/node_modules" "$APP_BUNDLE/Contents/Resources/"
+
+# onnxruntime-node (analyse vocale précise) embarque les binaires de TOUTES les
+# plateformes (~260 Mo) : ne garder que darwin/$NODE_ARCH.
+ORT_BIN="$APP_BUNDLE/Contents/Resources/node_modules/onnxruntime-node/bin/napi-v6"
+if [ -d "$ORT_BIN" ]; then
+  find "$ORT_BIN" -mindepth 1 -maxdepth 1 -type d ! -name darwin -exec rm -rf {} +
+  find "$ORT_BIN/darwin" -mindepth 1 -maxdepth 1 -type d ! -name "$NODE_ARCH" -exec rm -rf {} +
+  echo "  onnxruntime élagué : $(du -sh "$ORT_BIN" | cut -f1) (darwin/$NODE_ARCH)"
+fi
 
 # ── 5b. Extraction binaires ffmpeg/ffprobe + shims minimalistes ───────────────
 echo "→ Extraction binaires ffmpeg/ffprobe (darwin-${NODE_ARCH})..."

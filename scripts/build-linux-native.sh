@@ -98,10 +98,20 @@ cp -r "$PY_TRAY_DIST/." "$APPDIR/app/"
 cp "$NODE_BIN"               "$APPDIR/bundle/node"
 chmod +x "$APPDIR/bundle/node"
 cp "$ROOT_DIR/main.js"       "$APPDIR/bundle/"
+cp "$ROOT_DIR/vocal-precise.js" "$APPDIR/bundle/"
 cp "$ROOT_DIR/package.json"  "$APPDIR/bundle/"
 cp -r "$ROOT_DIR/local-ui"   "$APPDIR/bundle/"
 cp -r "$ROOT_DIR/models"     "$APPDIR/bundle/"
 cp -r "$ROOT_DIR/node_modules" "$APPDIR/bundle/"
+
+# onnxruntime-node (analyse vocale précise) embarque les binaires de TOUTES les
+# plateformes (~260 Mo) : ne garder que linux/$NODE_ARCH.
+ORT_BIN="$APPDIR/bundle/node_modules/onnxruntime-node/bin/napi-v6"
+if [ -d "$ORT_BIN" ]; then
+  find "$ORT_BIN" -mindepth 1 -maxdepth 1 -type d ! -name linux -exec rm -rf {} +
+  find "$ORT_BIN/linux" -mindepth 1 -maxdepth 1 -type d ! -name "$NODE_ARCH" -exec rm -rf {} +
+  echo "  onnxruntime élagué : $(du -sh "$ORT_BIN" | cut -f1) (linux/$NODE_ARCH)"
+fi
 
 # ── 4b. Extraction binaires ffmpeg/ffprobe + shims minimalistes ───────────────
 echo "→ Extraction binaires ffmpeg/ffprobe (linux-${NODE_ARCH})..."

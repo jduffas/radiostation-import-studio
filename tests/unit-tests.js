@@ -127,6 +127,27 @@ TOTAL   46442 [10:19.17]    (audio only)
   check('vocalZones: pont tilt ≈ 6500-9500ms', !!zBridge && Math.abs(zBridge.start_ms - 6500) <= 250 && Math.abs(zBridge.end_ms - 9500) <= 250, JSON.stringify(zBridge));
   check('vocalZones: -inf géré', M._parseAstats('pts_time:0.0\nlavfi.astats.Overall.RMS_level=-inf\n')[0].rms_db === -90);
 
+  // ---- vocal-precise : segmentation de la courbe vocale (pure, sans ORT ni modèle) ----
+  const VP = require(path.join(__dirname, '..', 'vocal-precise.js'));
+  check('vocal-precise: isAvailable() répond un booléen', typeof VP.isAvailable() === 'boolean');
+  const mkFrames = (fn) => {
+    const fr = [];
+    for (let t = 0; t < 60000; t += 23.2) fr.push({ t_ms: t, mix_db: 60, voc_db: fn(t) });
+    return fr;
+  };
+  // Voix 0-20s et 35-60s (voc à −8 dB du mix), pont 20-35s (−22 dB)
+  const zsP = VP.segmentVocalCurve(mkFrames(t => (t < 20000 || t >= 35000) ? 52 : 38), 60000);
+  check('segmentVocalCurve: 1 zone (pont 20-35s)', zsP.length === 1, JSON.stringify(zsP));
+  check('segmentVocalCurve: bornes ≈ 20.2s → 34.8s (gardes 200ms)',
+    zsP.length === 1 && Math.abs(zsP[0].start_ms - 20200) <= 400 && Math.abs(zsP[0].end_ms - 34800) <= 400, JSON.stringify(zsP[0]));
+  check('segmentVocalCurve: kind=bridge (mix plein volume)', zsP.length === 1 && zsP[0].kind === 'bridge', JSON.stringify(zsP[0]));
+  // Tout chanté → aucune zone
+  check('segmentVocalCurve: tout chanté → 0 zone', VP.segmentVocalCurve(mkFrames(() => 52), 60000).length === 0);
+  // Aucune voix → une seule grande zone tronquée aux marges de bord (5s / 55s)
+  const zsN = VP.segmentVocalCurve(mkFrames(() => 38), 60000);
+  check('segmentVocalCurve: instrumental complet → 1 zone tronquée aux bords',
+    zsN.length === 1 && zsN[0].start_ms === 5000 && zsN[0].end_ms === 55000, JSON.stringify(zsN));
+
   // ---- detectEnergyFromMean ----
   check('energy: -5→5, -10→4, -16→3, -22→2, -30→1, null→null',
     M.detectEnergyFromMean(-5) === 5 && M.detectEnergyFromMean(-10) === 4 && M.detectEnergyFromMean(-16) === 3 &&
