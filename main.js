@@ -138,58 +138,78 @@ function saveSettings(updates) {
 // ============================================================
 
 /**
- * Analyse un fichier WAV pour détecter les zones sans voix (jingle intérieur).
- * Miroir de _detect_vocal_zones_sync du site (backend/app/routers/tracks_waveform.py)
- * — les deux implémentations doivent rester synchronisées.
+ * Analyse un fichier audio pour détecter les zones sans voix (jingle intérieur).
+ * Objectif produit : proposer le PONT MUSICAL entier (le jingle se cale sur la fin
+ * de la zone), pas seulement des passages calmes.
  *
- * v2 (17 juil 2026) — deux critères complémentaires par fenêtre de 500 ms :
- *   1. « quiet »  : RMS bande vocale 300–3500 Hz < médiane(fenêtres actives) − 10 dB.
- *      Détecte les breakdowns calmes — seul critère de la v1, qui ratait tout pont
- *      instrumental joué à plein volume.
- *   2. « tilt »   : tilt spectral = RMS(300–1200) − RMS(1200–3500). La voix chantée
- *      concentre son énergie sous 1200 Hz (fondamentales + 1er formant) → tilt haut ;
- *      un pont/solo instrumental brillant (guitare, synthé, cymbales) → tilt bas.
- *      Seuil adaptatif : médiane(tilt actif) − 3,5 dB. Limite connue (irréductible
- *      sans ML) : une voix criée très brillante sur mur de guitares a le même profil
- *      spectral qu'un solo.
- * Les deux sous-bandes sont mesurées en une seule passe ffmpeg (filter_complex) ; la
- * RMS bande complète est reconstruite par somme d'énergie. Zones purement « tilt » :
- * minimum 3 s (anti-bruit). Marge d'exclusion des bords : 5 s.
+ * v3 (17 juil 2026) — trois signaux complémentaires par fenêtre de 250 ms
+ * (signal normalisé mono 48 kHz, asetnsamples=12000 + astats reset=1) :
+ *   1. « quiet » : RMS bande vocale 300–3500 Hz < médiane(fenêtres actives) − 10 dB.
+ *      Breakdowns calmes (seul critère de la v1, aveugle aux ponts à plein volume).
+ *   2. « tilt »  : tilt spectral = RMS(300–1200) − RMS(1200–3500) < médiane − 3,5 dB.
+ *      La voix chantée concentre son énergie sous 1200 Hz ; un pont/solo brillant
+ *      (guitare, synthé, cymbales) a un tilt bas.
+ *   3. « supp »  : modèle appris RNNoise (models/bd.rnnn, filtre ffmpeg arnndn) —
+ *      le filtre garde la voix et supprime le reste ; la suppression (RMS avant −
+ *      RMS après) est faible pendant la voix, forte pendant l'instrumental.
+ *      Fallback silencieux sans ce signal si le modèle est absent.
+ * Segmentation : score combiné lissé (±1 s) + hystérésis (entrée 1.0 / maintien
+ * 0.35) pour couvrir le pont d'un seul tenant, UNION avec les zones des critères
+ * binaires quiet/tilt (recall). Bords : marge 5 s, zone longue pénétrant ≥ 15 s
+ * vers l'intérieur tronquée au lieu d'être perdue. Limite connue (irréductible sans
+ * séparation de sources) : une voix criée très brillante sur mur de guitares a le
+ * même profil qu'un solo.
  *
- * asetnsamples force des frames d'exactement 22050 échantillons (500 ms à 44,1 kHz —
- * les WAV rippés d'un CD sont toujours en 44,1 kHz) et reset=1 réinitialise les stats
- * à chaque frame → vraie RMS par fenêtre de 500 ms. Bug réel corrigé (16 juil 2026) :
- * l'ancien `astats=reset=22050` comptait 22050 FRAMES et non des échantillons — les
- * RMS étaient cumulatives, toute zone au milieu/fin de piste était indétectable.
+ * ffmpeg est lancé avec cwd = répertoire temporaire dédié et des chemins RELATIFS
+ * dans le filtergraph (fichiers stats + modèle) : un chemin absolu Windows
+ * (`C:\...`) est invalide dans un filtergraph (le `:` termine l'option).
  *
- * @param {string} wavPath   Chemin du fichier WAV à analyser
+ * @param {string} wavPath   Chemin du fichier audio à analyser
  * @param {number|null} durationMs  Durée totale estimée en ms (pour timeout)
  * @returns {Promise<Array<{start_ms,end_ms,duration_ms,avg_rms_db,kind}>>}
  */
+const VOCAL_MODEL_SRC = path.join(__dirname, 'models', 'bd.rnnn');
+
 async function analyzeVocalZones(wavPath, durationMs) {
   return new Promise((resolve) => {
-    const uniq = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    const lowPath = path.join(os.tmpdir(), `rsanalysis-lo-${uniq}.txt`);
-    const highPath = path.join(os.tmpdir(), `rsanalysis-hi-${uniq}.txt`);
-    const nullOutput = PLATFORM === 'win32' ? 'NUL' : '/dev/null';
+    let workDir;
+    try {
+      workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rs-vocal-'));
+    } catch (e) {
+      console.warn('[analyzeVocalZones] mkdtemp impossible:', e.message);
+      resolve([]);
+      return;
+    }
     const cleanup = () => {
-      try { fs.unlinkSync(lowPath); } catch {}
-      try { fs.unlinkSync(highPath); } catch {}
+      try { fs.rmSync(workDir, { recursive: true, force: true }); } catch {}
     };
 
-    const stats = 'asetnsamples=n=22050,astats=metadata=1:reset=1';
-    const filterComplex =
-      '[0:a]aformat=channel_layouts=stereo,pan=mono|c0=0.5*c0+0.5*c1,asplit=2[lo][hi];' +
-      `[lo]highpass=f=300,lowpass=f=1200,${stats},ametadata=mode=print:file=${lowPath}[loo];` +
-      `[hi]highpass=f=1200,lowpass=f=3500,${stats},ametadata=mode=print:file=${highPath}[hio]`;
+    // Copie du modèle dans le répertoire de travail (readFileSync traverse l'asar
+    // d'Electron, contrairement à un accès direct par un binaire externe).
+    let hasModel = false;
+    try {
+      fs.writeFileSync(path.join(workDir, 'v.rnnn'), fs.readFileSync(VOCAL_MODEL_SRC));
+      hasModel = true;
+    } catch { /* fallback sans modèle */ }
 
-    const proc = spawn(FFMPEG, [
+    const nullOutput = PLATFORM === 'win32' ? 'NUL' : '/dev/null';
+    const stats = 'asetnsamples=n=12000,astats=metadata=1:reset=1';
+    const filterComplex =
+      `[0:a]aformat=sample_rates=48000:channel_layouts=mono,asplit=${hasModel ? 3 : 2}[lo][hi]${hasModel ? '[vc]' : ''};` +
+      `[lo]highpass=f=300,lowpass=f=1200,${stats},ametadata=mode=print:file=low.txt[loo];` +
+      `[hi]highpass=f=1200,lowpass=f=3500,${stats},ametadata=mode=print:file=high.txt[hio]` +
+      (hasModel ? `;[vc]arnndn=m=v.rnnn,highpass=f=300,lowpass=f=3500,${stats},ametadata=mode=print:file=voc.txt[vco]` : '');
+
+    const args = [
       '-v', 'quiet',
       '-i', wavPath,
       '-filter_complex', filterComplex,
       '-map', '[loo]', '-f', 'null', nullOutput,
       '-map', '[hio]', '-f', 'null', nullOutput,
-    ]);
+    ];
+    if (hasModel) args.push('-map', '[vco]', '-f', 'null', nullOutput);
+
+    const proc = spawn(FFMPEG, args, { cwd: workDir });
 
     let stderr = '';
     proc.stderr.on('data', d => { stderr += d.toString(); });
@@ -212,10 +232,14 @@ async function analyzeVocalZones(wavPath, durationMs) {
         return;
       }
       try {
-        const lowOutput = fs.readFileSync(lowPath, 'utf8');
-        const highOutput = fs.readFileSync(highPath, 'utf8');
+        const lowOutput = fs.readFileSync(path.join(workDir, 'low.txt'), 'utf8');
+        const highOutput = fs.readFileSync(path.join(workDir, 'high.txt'), 'utf8');
+        let vocOutput = null;
+        if (hasModel) {
+          try { vocOutput = fs.readFileSync(path.join(workDir, 'voc.txt'), 'utf8'); } catch {}
+        }
         cleanup();
-        resolve(_computeVocalZones(lowOutput, highOutput, durationMs));
+        resolve(_computeVocalZones(lowOutput, highOutput, vocOutput, durationMs));
       } catch (e) {
         cleanup();
         console.warn('[analyzeVocalZones] Erreur lecture stats:', e.message);
@@ -247,76 +271,127 @@ function _parseAstats(output) {
   return windows;
 }
 
-function _computeVocalZones(lowOutput, highOutput, totalDurationMs) {
+function _computeVocalZones(lowOutput, highOutput, vocOutput, totalDurationMs) {
+  const WINDOW_MS = 250;
   const lowWindows = _parseAstats(lowOutput);
   const highWindows = _parseAstats(highOutput);
+  const vocWindows = vocOutput ? _parseAstats(vocOutput) : null;
 
   // Jointure par index (mêmes fenêtres issues du même asplit) ; RMS bande complète
   // 300–3500 reconstruite par somme d'énergie des deux sous-bandes.
   const windows = [];
-  const n = Math.min(lowWindows.length, highWindows.length);
+  let n = Math.min(lowWindows.length, highWindows.length);
+  if (vocWindows) n = Math.min(n, vocWindows.length);
   for (let i = 0; i < n; i++) {
     const lo = lowWindows[i], hi = highWindows[i];
     const band = 10 * Math.log10(Math.pow(10, lo.rms_db / 10) + Math.pow(10, hi.rms_db / 10));
-    windows.push({ time_ms: lo.time_ms, band_db: band, tilt_db: lo.rms_db - hi.rms_db });
+    windows.push({
+      time_ms: lo.time_ms,
+      band_db: band,
+      tilt_db: lo.rms_db - hi.rms_db,
+      supp_db: vocWindows ? band - vocWindows[i].rms_db : null,
+    });
   }
-  if (windows.length < 4) return [];
+  if (windows.length < 16) return [];
 
   // Seuils adaptatifs sur les fenêtres actives
+  const median = (arr) => { const s = [...arr].sort((a, b) => a - b); return s[Math.floor(s.length / 2)]; };
   const active = windows.filter(w => w.band_db > -55);
   if (!active.length) return [];
-  const sortedRms = active.map(w => w.band_db).sort((a, b) => a - b);
-  const quietThr = sortedRms[Math.floor(sortedRms.length * 0.5)] - 10;
-  const sortedTilt = active.map(w => w.tilt_db).sort((a, b) => a - b);
-  const tiltThr = sortedTilt[Math.floor(sortedTilt.length * 0.5)] - 3.5;
+  const quietThr = median(active.map(w => w.band_db)) - 10;
+  const tiltThr = median(active.map(w => w.tilt_db)) - 3.5;
+  const supps = active.map(w => w.supp_db).filter(v => v !== null && isFinite(v));
+  const medSupp = supps.length >= 16 ? median(supps) : null;
 
-  const WINDOW_MS = 500;
   const total = totalDurationMs || (windows[windows.length - 1].time_ms + WINDOW_MS);
-  const MIN_ZONE_MS = total > 30000 ? 2000 : 1000;
-  const MIN_BRIDGE_MS = Math.max(MIN_ZONE_MS, 3000); // zones purement « tilt » : anti-bruit
+  const MIN_ZONE_MS = total > 30000 ? 2000 : 1000; // zones contenant du quiet
+  const MIN_BRIDGE_MS = Math.max(MIN_ZONE_MS, 3000); // zones sans fenêtre quiet : anti-bruit
   const EDGE_MS = total > 30000 ? 5000 : 1;
-  const GAP_MS = WINDOW_MS * 2; // tolérance 1 fenêtre de vide entre deux zones
+  const GAP_MS = 1000; // tolérance de vide entre fenêtres d'une même zone
 
-  const flagged = [];
-  for (const w of windows) {
-    const isQuiet = w.band_db < quietThr;
-    const isBridge = !isQuiet && w.band_db > -55 && w.tilt_db < tiltThr;
-    if (isQuiet || isBridge) flagged.push({ ...w, quiet: isQuiet });
-  }
-  if (!flagged.length) return [];
+  const isQuietW = (w) => w.band_db < quietThr;
 
-  // Fusion des fenêtres adjacentes en zones continues
-  const zones = [];
-  const closeZone = (zStart, zEnd, sumRms, cnt, quietCnt) => {
-    const minMs = quietCnt > 0 ? MIN_ZONE_MS : MIN_BRIDGE_MS;
-    if (zEnd - zStart >= minMs) {
-      zones.push({
-        start_ms: zStart, end_ms: Math.min(zEnd, total), duration_ms: zEnd - zStart,
-        avg_rms_db: Math.round((sumRms / cnt) * 10) / 10,
-        kind: quietCnt > 0 ? 'quiet' : 'bridge',
-      });
-    }
-  };
-  let zStart = flagged[0].time_ms;
-  let zEnd = flagged[0].time_ms + WINDOW_MS;
-  let sumRms = flagged[0].band_db;
-  let cnt = 1;
-  let quietCnt = flagged[0].quiet ? 1 : 0;
+  // ── Score combiné « pas de voix » par fenêtre, borné signal par signal ──
+  const scores = windows.map(w => {
+    if (w.band_db <= -55) return 1.5; // quasi-silence : franchement sans voix
+    const sQuiet = Math.max(0, Math.min(1.5, (quietThr - w.band_db) / 6));
+    const sTilt = Math.max(-1, Math.min(1.5, (tiltThr - w.tilt_db) / 4));
+    const sSupp = (medSupp !== null && w.supp_db !== null)
+      ? Math.max(-1, Math.min(1.5, (w.supp_db - medSupp - 2.0) / 4))
+      : 0;
+    return sQuiet + sTilt + sSupp;
+  });
 
-  for (let i = 1; i < flagged.length; i++) {
-    const w = flagged[i];
-    if (w.time_ms <= zEnd + GAP_MS) {
-      zEnd = w.time_ms + WINDOW_MS;
-      sumRms += w.band_db;
-      cnt++;
-      if (w.quiet) quietCnt++;
+  // Lissage : moyenne mobile ±4 fenêtres (±1 s)
+  const SMOOTH_R = 4;
+  const smoothed = scores.map((_, i) => {
+    const a = Math.max(0, i - SMOOTH_R), b = Math.min(scores.length, i + SMOOTH_R + 1);
+    let s = 0;
+    for (let j = a; j < b; j++) s += scores[j];
+    return s / (b - a);
+  });
+
+  // Hystérésis : on entre quand le score lissé passe T_IN, la zone s'étend dans les
+  // deux sens tant qu'il reste au-dessus de T_OUT → couvre le pont d'un seul tenant.
+  const T_IN = 1.0, T_OUT = 0.35;
+  const hystZones = [];
+  let i = 0;
+  while (i < smoothed.length) {
+    if (smoothed[i] >= T_IN) {
+      let j0 = i, j1 = i;
+      while (j0 > 0 && smoothed[j0 - 1] > T_OUT) j0--;
+      while (j1 + 1 < smoothed.length && smoothed[j1 + 1] > T_OUT) j1++;
+      hystZones.push([windows[j0].time_ms, windows[j1].time_ms + WINDOW_MS]);
+      i = j1 + 1;
     } else {
-      closeZone(zStart, zEnd, sumRms, cnt, quietCnt);
-      zStart = w.time_ms; zEnd = w.time_ms + WINDOW_MS; sumRms = w.band_db; cnt = 1;
-      quietCnt = w.quiet ? 1 : 0;
+      i++;
     }
   }
-  closeZone(zStart, zEnd, sumRms, cnt, quietCnt);
+
+  // ── Zones des critères binaires (quiet / tilt), fusion avec tolérance de vide ──
+  const flagged = windows.filter(w => isQuietW(w) || (w.band_db > -55 && w.tilt_db < tiltThr));
+  const binZones = [];
+  if (flagged.length) {
+    let zStart = flagged[0].time_ms, zEnd = flagged[0].time_ms + WINDOW_MS;
+    for (let k = 1; k <= flagged.length; k++) {
+      const w = flagged[k];
+      if (w && w.time_ms <= zEnd + GAP_MS) {
+        zEnd = w.time_ms + WINDOW_MS;
+      } else {
+        binZones.push([zStart, zEnd]);
+        if (w) { zStart = w.time_ms; zEnd = w.time_ms + WINDOW_MS; }
+      }
+    }
+  }
+
+  // ── Union des deux familles + filtres de durée par type d'évidence ──
+  const winsIn = (s, e) => windows.filter(w => w.time_ms >= s && w.time_ms < e);
+  const zoneOk = (s, e) => {
+    const inWins = winsIn(s, e);
+    const hasQuiet = inWins.some(isQuietW);
+    return e - s >= (hasQuiet ? MIN_ZONE_MS : MIN_BRIDGE_MS);
+  };
+  const candidates = [...hystZones.filter(([s, e]) => zoneOk(s, e)),
+                      ...binZones.filter(([s, e]) => zoneOk(s, e))]
+    .sort((a, b) => a[0] - b[0]);
+  const merged = [];
+  for (const [s, e] of candidates) {
+    const last = merged[merged.length - 1];
+    if (last && s <= last[1] + 2 * WINDOW_MS) last[1] = Math.max(last[1], e);
+    else merged.push([s, e]);
+  }
+
+  const zones = merged.map(([s, e]) => {
+    const inWins = winsIn(s, e);
+    const avg = inWins.length
+      ? inWins.reduce((acc, w) => acc + w.band_db, 0) / inWins.length
+      : -90;
+    return {
+      start_ms: s, end_ms: Math.min(e, total), duration_ms: Math.min(e, total) - s,
+      avg_rms_db: Math.round(avg * 10) / 10,
+      kind: inWins.some(isQuietW) ? 'quiet' : 'bridge',
+    };
+  });
 
   // Zones au bord de la piste : le rôle de l'intro/de la transition (cue points) est de
   // gérer un jingle en tête/queue — une zone "jingle intérieur" au bord fait doublon et

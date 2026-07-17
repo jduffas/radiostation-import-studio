@@ -100,6 +100,7 @@ chmod +x "$APPDIR/bundle/node"
 cp "$ROOT_DIR/main.js"       "$APPDIR/bundle/"
 cp "$ROOT_DIR/package.json"  "$APPDIR/bundle/"
 cp -r "$ROOT_DIR/local-ui"   "$APPDIR/bundle/"
+cp -r "$ROOT_DIR/models"     "$APPDIR/bundle/"
 cp -r "$ROOT_DIR/node_modules" "$APPDIR/bundle/"
 
 # ── 4b. Extraction binaires ffmpeg/ffprobe + shims minimalistes ───────────────
