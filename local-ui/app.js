@@ -12,6 +12,7 @@ import { keyFromChroma } from './vendor/key-detect.js'
 const $app = document.getElementById('app')
 const $pairingIndicator = document.getElementById('pairing-indicator')
 const $vocalToggle = document.getElementById('vocal-toggle')
+const $vocalToggleLabel = document.getElementById('vocal-toggle-label')
 const $fastRipToggle = document.getElementById('fast-rip-toggle')
 const $fastRipLabel = document.getElementById('fast-rip-label')
 const $pageTitle = document.getElementById('page-title')
@@ -27,6 +28,12 @@ function updatePageTitle() {
   // "Rip rapide" (cdparanoia -Z) ne concerne que la lecture physique d'un CD — masqué hors
   // du mode CD (sélecteur de mode, import fichiers) où il n'a aucun effet.
   if ($fastRipLabel) $fastRipLabel.style.display = appMode === 'cd' ? '' : 'none'
+  // "Analyse vocale" ne fait que PRÉ-calculer les zones jingle pendant le rip CD (sinon
+  // calculées à la demande, sans réglage, au premier passage en mode jingle — cf.
+  // ensureVocalZones) : sans effet en mode fichiers, où le bouton de détection du mode
+  // jingle fait le même travail à la demande quoi qu'il arrive. Masqué hors mode CD, comme
+  // "Rip rapide" (signalé : redondant/confus avec le bouton adaptatif du mode jingle).
+  if ($vocalToggleLabel) $vocalToggleLabel.style.display = appMode === 'cd' ? '' : 'none'
 }
 
 let settings = {}
@@ -474,19 +481,29 @@ function renderTrimming() {
       </div>
       <div id="mode-panel"></div>
       <div class="actions">
+        ${trimIndex > 0 ? '<button class="btn-secondary" id="btn-prev-track">◀ Précédent</button>' : ''}
         <button class="btn-secondary" id="btn-skip-track">Passer (garder tel quel)</button>
         <button class="btn" id="btn-confirm-track">Valider et continuer</button>
       </div>
     </div>`
 
   editorContext = { flow: 'cd', trackNumber: track.trackNumber, initialVocalZones: track.vocalZones || null }
-  setupTrimWaveform(`/rip-preview/${track.trackNumber}`)
+  // Retour arrière (bouton Précédent) sur une piste déjà validée une fois : restaure les
+  // cue points/zone jingle confirmés au lieu de rouvrir à l'état par défaut (signalé :
+  // "on ne peut pas revenir en arrière"). Rien de stocké pour un "Passer" (localCuePoints
+  // n'est renseigné que par advanceTrimming(data) avec data non-null).
+  setupTrimWaveform(`/rip-preview/${track.trackNumber}`, () => {
+    if (localCuePoints[trimIndex]) applyStoredCuePoints(localCuePoints[trimIndex])
+  })
   wireEditorModeTabs()
   renderModePanel()
+  if (trimIndex > 0) {
+    document.getElementById('btn-prev-track').onclick = () => { trimIndex -= 1; render() }
+  }
 
   document.getElementById('btn-skip-track').onclick = () => advanceTrimming(null)
   document.getElementById('btn-confirm-track').onclick = onConfirmTrack
-  document.getElementById('btn-reset').onclick = () => trimMarkers?.resetToFull()
+  document.getElementById('btn-reset').onclick = () => resetCurrentMode()
 }
 
 let trimMarkers = null // { trimStart, trimEnd, cueInPos, cueOutPos, keepRegion, cueInRegion, cueOutRegion, mode, overlay*, cuts, volumeDb, fade* }
@@ -564,32 +581,6 @@ function setupTrimWaveform(previewUrl, onReady) {
     disableDragSel: null,
     volumeDb: 0, fadeInMs: 0, fadeInCurve: 'tri', fadeOutMs: 0, fadeOutCurve: 'tri',
     volumePoints: [], // [{timeMs, db}] — courbe d'automation (timeline waveform)
-    // Bug réel trouvé et corrigé (Phase 4) : le bouton "Tout réinitialiser" appelait déjà
-    // trimMarkers?.resetToFull() sans que la méthode existe jamais — clic sans effet
-    // (silencieux, aucune région ne bougeait). Généralisé en même temps que cette fonction.
-    resetToFull() {
-      const dur = wavesurfer.getDuration()
-      this.trimStart = 0; this.trimEnd = dur; this.cueInPos = 0; this.cueOutPos = dur
-      this.introPos = 0
-      this.keepRegion?.setOptions({ start: 0, end: dur })
-      this.cueInRegion?.setOptions({ start: 0 })
-      this.introRegion?.setOptions({ start: 0 })
-      this.cueOutRegion?.setOptions({ start: dur })
-      this.cuts.forEach(c => c.region.remove())
-      this.cuts = []
-      if (this.overlayRegion) { this.overlayRegion.remove(); this.overlayRegion = null }
-      this.overlayStart = null; this.overlayEnd = null; this.overlayTouched = false
-      this.volumeDb = 0; this.fadeInMs = 0; this.fadeOutMs = 0
-      this.fadeInCurve = 'tri'; this.fadeOutCurve = 'tri'
-      this.volumePoints = []
-      renderVolumeCurve()
-      updateVolumeOverlayVisibility()
-      renderFadeOverlay()
-      updateFadeOverlayVisibility()
-      wavesurfer?.setVolume(1)
-      renderModePanel()
-      updateSummary()
-    },
   }
 
   // Régions créées à la souris en mode montage (enableDragSelection) : adoptées comme
@@ -876,7 +867,61 @@ function setEditorMode(mode) {
   updateFadeOverlayVisibility()
   renderFadeOverlay()
 
+  // "Tout réinitialiser" ne réinitialise que l'outil affiché (cf. resetCurrentMode) —
+  // le libellé du bouton statique du controls-bar doit le refléter à chaque changement
+  // de mode (signalé : un "Tout réinitialiser" qui remettait tous les outils à zéro,
+  // pas seulement celui affiché, était trompeur et destructif pour le travail déjà fait
+  // sur les autres outils).
+  const $reset = document.getElementById('btn-reset')
+  if ($reset) $reset.textContent = RESET_LABELS[mode] || RESET_LABELS.cue
+
   renderModePanel()
+}
+
+// Libellés de #btn-reset par mode — cf. resetCurrentMode().
+const RESET_LABELS = {
+  cue: '↺ Réinitialiser les cue points',
+  jingle: '↺ Réinitialiser la zone jingle',
+  cut: '↺ Réinitialiser le montage',
+  volume: '↺ Réinitialiser volume & fondus',
+}
+
+// Remplace trimMarkers.resetToFull() comme action du bouton #btn-reset : ne remet à zéro
+// QUE le plan de l'outil actif, pas tous les outils à la fois (signalé : un fondu réglé en
+// mode volume ne devrait pas disparaître parce qu'on clique "réinitialiser" en mode cue).
+function resetCurrentMode() {
+  if (!trimMarkers || !wavesurfer) return
+  const dur = wavesurfer.getDuration()
+  const mode = trimMarkers.mode
+  if (mode === 'cue') {
+    trimMarkers.trimStart = 0; trimMarkers.trimEnd = dur
+    trimMarkers.cueInPos = 0; trimMarkers.cueOutPos = dur; trimMarkers.introPos = 0
+    trimMarkers.updating = true
+    trimMarkers.keepRegion?.setOptions({ start: 0, end: dur })
+    trimMarkers.cueInRegion?.setOptions({ start: 0 })
+    trimMarkers.introRegion?.setOptions({ start: 0 })
+    trimMarkers.cueOutRegion?.setOptions({ start: dur })
+    trimMarkers.updating = false
+  } else if (mode === 'jingle') {
+    if (trimMarkers.overlayRegion) { trimMarkers.overlayRegion.remove(); trimMarkers.overlayRegion = null }
+    trimMarkers.overlayStart = null
+    trimMarkers.overlayEnd = null
+    trimMarkers.overlayTouched = true
+  } else if (mode === 'cut') {
+    trimMarkers.cuts.forEach(c => c.region.remove())
+    trimMarkers.cuts = []
+    updateCutList()
+  } else if (mode === 'volume') {
+    trimMarkers.volumeDb = 0; trimMarkers.fadeInMs = 0; trimMarkers.fadeOutMs = 0
+    trimMarkers.fadeInCurve = 'tri'; trimMarkers.fadeOutCurve = 'tri'
+    trimMarkers.volumePoints = []
+    renderVolumeCurve()
+    updateVolumeOverlayVisibility()
+    renderFadeOverlay()
+    wavesurfer.setVolume(1)
+  }
+  renderModePanel()
+  updateSummary()
 }
 
 function renderModePanel() {
@@ -906,7 +951,11 @@ function renderModePanel() {
         <label class="panel-field">Transition avant fin (s)
           <input type="number" id="inp-cueout" min="0" step="0.01" value="${(trimMarkers.trimEnd - trimMarkers.cueOutPos).toFixed(2)}">
         </label>
+        ${editorContext?.flow === 'files' ? '<button class="btn-ctrl" id="btn-auto-cue">🔍 Détecter les silences (Début/Transition)</button>' : ''}
       </div>`
+    if (editorContext?.flow === 'files') {
+      document.getElementById('btn-auto-cue').onclick = () => autoDetectCue()
+    }
     document.getElementById('inp-cuein').onchange = (e) => {
       const v = Math.max(0, Number(e.target.value) || 0)
       const pos = Math.max(trimMarkers.trimStart, Math.min(trimMarkers.trimStart + v, trimMarkers.cueOutPos - 0.1))
@@ -1536,6 +1585,40 @@ function removeOverlayZone() {
   renderModePanel()
 }
 
+// Restaure les cue points/zone jingle déjà confirmés lors d'un passage précédent sur cette
+// piste/ce fichier (navigation Précédent) — sans ça, revenir en arrière rouvrait toujours
+// l'éditeur à l'état par défaut (signalé : "on ne peut pas revenir en arrière"). `stored` a
+// la forme de collectEditPayload() : {cueInSeconds, introSeconds, cueOutSeconds, overlay}
+// — positions déjà dans la timeline FINALE. Le fichier local a été réécrit en conséquence
+// si des coupes avaient été appliquées (même id, /files/preview ou /rip-preview sert la
+// version déjà coupée) : elles s'appliquent donc telles quelles à la waveform rouverte.
+// Les outils destructifs (montage/volume/fondus) ne sont volontairement PAS restaurés :
+// déjà appliqués au fichier, les rejouer serait trompeur (l'utilisateur les recréerait
+// par-dessus un fichier déjà modifié).
+function applyStoredCuePoints(stored) {
+  if (!stored || !trimMarkers || !wavesurfer) return
+  const dur = wavesurfer.getDuration()
+  const cueIn = Math.max(0, Math.min(stored.cueInSeconds || 0, dur))
+  const introP = Math.max(cueIn, Math.min(stored.introSeconds ?? cueIn, dur))
+  const cueOutPos = Math.max(cueIn, Math.min(dur - (stored.cueOutSeconds || 0), dur))
+  trimMarkers.cueInPos = cueIn
+  trimMarkers.introPos = introP
+  trimMarkers.cueOutPos = cueOutPos
+  trimMarkers.updating = true
+  trimMarkers.cueInRegion?.setOptions({ start: cueIn })
+  trimMarkers.introRegion?.setOptions({ start: introP })
+  trimMarkers.cueOutRegion?.setOptions({ start: cueOutPos })
+  trimMarkers.updating = false
+  if (stored.overlay?.enabled && stored.overlay.start != null && stored.overlay.end != null) {
+    setOverlayZone(stored.overlay.start, stored.overlay.end)
+  }
+  // Marque la zone comme "déjà décidée" (posée ou explicitement absente) pour empêcher
+  // l'auto-suggestion vocale de l'écraser au premier passage en mode jingle.
+  trimMarkers.overlayTouched = true
+  renderModePanel()
+  updateSummary()
+}
+
 // ---- Collecte de l'édition au moment de « Valider et continuer » ----
 
 // Coupes de montage rognées à la zone conservée, triées et fusionnées si chevauchement —
@@ -1859,6 +1942,7 @@ async function uploadSelectedFiles(fileList) {
         introSeconds: 0,
         cueOutSeconds: 0,
         overlay: null,
+        editedOnce: false, // true après un premier "Valider et continuer" (pas "Passer") — cf. bouton Précédent
         bpm: null,
         key: null,
         loudnessLufs: null,
@@ -1896,7 +1980,6 @@ function renderFilesTrimming() {
           <button class="btn-ctrl" id="btn-playpause">►</button>
           <button class="btn-ctrl" id="btn-stop">Stop</button>
           <button class="btn-ctrl" id="btn-reset">Tout réinitialiser</button>
-          <button class="btn-ctrl" id="btn-auto-cue">🔍 Détecter automatiquement</button>
         </div>
         <div class="zoom-group">
           <button class="btn-ctrl" id="btn-zoom-out" title="Zoom arrière">➖</button>
@@ -1926,6 +2009,7 @@ function renderFilesTrimming() {
       </div>
       <div id="mode-panel"></div>
       <div class="actions">
+        ${filesEditingIndex > 0 ? '<button class="btn-secondary" id="btn-prev-file">◀ Précédent</button>' : ''}
         <button class="btn-secondary" id="btn-skip-file">Passer (garder tel quel)</button>
         <button class="btn" id="btn-confirm-file">Valider et continuer</button>
       </div>
@@ -1933,6 +2017,18 @@ function renderFilesTrimming() {
 
   editorContext = { flow: 'files', fileId: item.id, initialVocalZones: null }
   setupTrimWaveform(`/files/preview/${item.id}`, () => {
+    // Retour arrière (bouton Précédent) sur un fichier déjà validé une fois : restaure les
+    // cue points/zone jingle confirmés au lieu de rouvrir à l'état par défaut (signalé :
+    // "on ne peut pas revenir en arrière"). Rien à restaurer pour un "Passer" (editedOnce
+    // reste false) — l'état par défaut EST le résultat attendu dans ce cas.
+    if (item.editedOnce) {
+      applyStoredCuePoints({
+        cueInSeconds: item.cueInSeconds,
+        introSeconds: item.introSeconds,
+        cueOutSeconds: item.cueOutSeconds,
+        overlay: item.overlay,
+      })
+    }
     item.analyzing = true
     updateFilesTrimmingBpmKey(item)
     analyzeBpmKey(item)
@@ -1941,10 +2037,12 @@ function renderFilesTrimming() {
   renderModePanel()
   updateFilesTrimmingBpmKey(item)
 
+  if (filesEditingIndex > 0) {
+    document.getElementById('btn-prev-file').onclick = () => { filesEditingIndex -= 1; render() }
+  }
   document.getElementById('btn-skip-file').onclick = () => advanceFilesTrimming(null)
   document.getElementById('btn-confirm-file').onclick = onConfirmFilesTrack
-  document.getElementById('btn-reset').onclick = () => trimMarkers?.resetToFull()
-  document.getElementById('btn-auto-cue').onclick = () => autoDetectCue(item)
+  document.getElementById('btn-reset').onclick = () => resetCurrentMode()
 }
 
 function updateFilesTrimmingBpmKey(item) {
@@ -1954,12 +2052,15 @@ function updateFilesTrimmingBpmKey(item) {
   if ($key) $key.textContent = item.analyzing ? '…' : (item.key || '—')
 }
 
-async function autoDetectCue(item) {
+// Bouton adaptatif du mode cue points (renderModePanel), réservé au flux fichiers
+// (pas d'équivalent /rip/detect-cue côté CD) — fileId pris sur editorContext, pas besoin
+// de le faire transiter depuis filesItems.
+async function autoDetectCue() {
   try {
     const cue = await api('/files/detect-cue', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ file_id: item.id }),
+      body: JSON.stringify({ file_id: editorContext.fileId }),
     })
     if (!trimMarkers || !wavesurfer) return
     const cueIn = Math.max(trimMarkers.trimStart, Math.min(cue.intro_seconds, trimMarkers.trimEnd - 0.1))
@@ -2044,6 +2145,7 @@ async function advanceFilesTrimming(data) {
   item.introSeconds = data ? data.introSeconds : 0
   item.cueOutSeconds = data ? data.cueOutSeconds : 0
   item.overlay = data ? data.overlay : null
+  if (data) item.editedOnce = true // cf. bouton Précédent, ne restaure rien pour un "Passer"
 
   // Loudness/energy/start-end type ffmpeg côté serveur — après coupe éventuelle, pour que
   // start_type reflète le vrai début audible (cue_in_seconds).
@@ -2051,7 +2153,7 @@ async function advanceFilesTrimming(data) {
     const loud = await api('/files/analyze-loudness', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ file_id: item.id, cue_in_seconds: cueInSeconds }),
+      body: JSON.stringify({ file_id: item.id, cue_in_seconds: item.cueInSeconds }),
     })
     item.loudnessLufs = loud.loudness_lufs
     item.energy = loud.energy

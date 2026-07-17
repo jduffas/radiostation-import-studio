@@ -60,8 +60,10 @@ async function waitUp(url, ms = 8000) {
   check('UI: indicateur "Connecté à"', pairing.includes('Connecté à'), pairing);
   await page.waitForSelector('#btn-mode-files', { timeout: 5000 });
   check('UI: sélecteur de mode affiché', true);
-  // "Rip rapide" ne concerne que la lecture physique d'un CD → masqué au sélecteur de mode.
+  // "Rip rapide"/"Analyse vocale" ne concernent que la lecture physique d'un CD (pré-calcul
+  // pendant le rip pour Analyse vocale) → masqués au sélecteur de mode.
   check('UI: "Rip rapide" masqué hors mode CD (sélecteur de mode)', !(await page.isVisible('#fast-rip-label')));
+  check('UI: "Analyse vocale" masqué hors mode CD (sélecteur de mode)', !(await page.isVisible('#vocal-toggle-label')));
 
   // Mode CD : écran "Aucun disque" (pas de CD sur ce Pi), bouton désactivé, retour
   await page.click('#btn-mode-cd');
@@ -69,6 +71,7 @@ async function waitUp(url, ms = 8000) {
   const tocDisabled = await page.$eval('#btn-toc', el => el.disabled);
   check('UI CD: sans CD → bouton pistes désactivé', tocDisabled === true);
   check('UI CD: "Rip rapide" visible en mode CD', await page.isVisible('#fast-rip-label'));
+  check('UI CD: "Analyse vocale" visible en mode CD', await page.isVisible('#vocal-toggle-label'));
   await page.click('#btn-back-mode');
   await page.waitForSelector('#btn-mode-files', { timeout: 5000 });
   check('UI CD: retour sélecteur de mode', true);
@@ -77,6 +80,7 @@ async function waitUp(url, ms = 8000) {
   await page.click('#btn-mode-files');
   await page.waitForSelector('#files-input', { timeout: 5000, state: 'attached' });
   check('UI fichiers: "Rip rapide" masqué en mode fichiers', !(await page.isVisible('#fast-rip-label')));
+  check('UI fichiers: "Analyse vocale" masqué en mode fichiers (redondant avec le bouton adaptatif du mode jingle)', !(await page.isVisible('#vocal-toggle-label')));
   await page.setInputFiles('#files-input', path.join(SCRATCH, '.tmp', 'fixtures', 'Artist One - Nice Song.wav'));
 
   // Écran d'édition : waveform + résumé
@@ -126,6 +130,9 @@ async function waitUp(url, ms = 8000) {
   check('UI fichiers: étiquette DÉBUT masquée en mode jingle', !(await page.isVisible('#waveform [part~="cue-in"]')));
   check('UI fichiers: étiquette INTRO masquée en mode jingle', !(await page.isVisible('#waveform [part~="intro-end"]')));
   check('UI fichiers: étiquette TRANSITION masquée en mode jingle', !(await page.isVisible('#waveform [part~="cue-out"]')));
+  // "Détecter les silences" (mode cue points) n'a pas de sens en mode jingle — le mode
+  // jingle a son propre bouton adaptatif ("Proposer depuis la voix détectée" ci-dessous).
+  check('UI fichiers: bouton détection silences absent en mode jingle', !(await page.isVisible('#btn-auto-cue')));
   // Attendre la fin de l'analyse vocale à la demande (le panneau se re-rend à la fin —
   // cliquer pendant l'analyse risquerait un élément détaché)
   await page.waitForFunction(() => {
@@ -141,8 +148,10 @@ async function waitUp(url, ms = 8000) {
   await page.click('.mode-tab[data-mode="cut"]');
   await page.waitForSelector('#cut-list', { timeout: 5000 });
   check('UI fichiers: mode montage, liste vide', (await page.textContent('#cut-list')).includes('Aucune coupe'));
+  check('UI fichiers: bouton détection silences absent en mode montage', !(await page.isVisible('#btn-auto-cue')));
   await page.click('.mode-tab[data-mode="volume"]');
   await page.waitForSelector('#vol-slider', { timeout: 5000 });
+  check('UI fichiers: bouton détection silences absent en mode volume', !(await page.isVisible('#btn-auto-cue')));
   await page.$eval('#vol-slider', el => { el.value = '-6'; el.dispatchEvent(new Event('input')); });
   check('UI fichiers: mode volume, -6.0 dB affiché', (await page.textContent('#vol-value')).includes('-6.0'));
   // Courbe d'automation (v1.9) : zoom verrouillé + clic sur la ligne → point ajouté
@@ -210,10 +219,19 @@ async function waitUp(url, ms = 8000) {
   const sumCueOutShortcut = await page.textContent('#sum-cueout');
   check('UI fichiers: raccourci O pose TRANSITION', sumCueOutShortcut.trim() !== '00:00.000', sumCueOutShortcut);
 
-  // "Tout réinitialiser" ne plante pas (bug historique: resetToFull inexistant) — et remet
-  // aussi à zéro l'état de l'éditeur unifié (volume -6 dB posé juste au-dessus)
+  // "Tout réinitialiser" (bug historique: resetToFull inexistant, corrigé) — scopé à l'outil
+  // actif (mode cue points ici, signalé) : le libellé du bouton s'adapte, et le reset ne
+  // touche PAS le volume/fondu réglés plus haut en mode Volume & fondus.
+  const resetLabel = await page.textContent('#btn-reset');
+  check('UI fichiers: libellé "Tout réinitialiser" adapté au mode cue points', /cue points/i.test(resetLabel), resetLabel);
   await page.click('#btn-reset');
   check('UI fichiers: reset marqueurs sans erreur JS', pageErrors.length === 0, pageErrors.join(' ; '));
+  const sumCueInAfterReset = await page.textContent('#sum-cuein');
+  check('UI fichiers: reset (mode cue) remet Début à zéro', sumCueInAfterReset.trim() === '00:00.000', sumCueInAfterReset);
+  await page.click('.mode-tab[data-mode="volume"]');
+  const volAfterReset = await page.textContent('#vol-value');
+  check('UI fichiers: reset (mode cue) ne touche pas le volume réglé dans un autre mode', volAfterReset.includes('-6.0'), volAfterReset);
+  await page.click('.mode-tab[data-mode="cue"]');
 
   // Valider → envoi groupé vers stub → écran d'envoi
   await page.click('#btn-confirm-file');
@@ -237,6 +255,44 @@ async function waitUp(url, ms = 8000) {
   check('UI fichiers: /import reçu par le backend avec titre + cue', !!imp && imp.payload.title === 'Nice Song' && 'cue_in_seconds' in imp.payload, JSON.stringify(imp?.payload));
   check('UI fichiers: année invalide "abc" omise du payload', !!imp && !('year' in imp.payload), JSON.stringify(imp?.payload));
   check('UI fichiers: BPM transmis si détecté', !!imp && (imp.payload.bpm === undefined || typeof imp.payload.bpm === 'number'), JSON.stringify(imp?.payload.bpm));
+
+  // ---- Navigation "Précédent" (2 fichiers) : signalé, on ne pouvait pas revenir en
+  // arrière après "Valider et continuer" — les cue points déjà confirmés doivent être
+  // restaurés, pas remis à l'état par défaut. ----
+  await page.click('#btn-new-files');
+  await page.waitForSelector('#files-input', { timeout: 5000, state: 'attached' });
+  await page.setInputFiles('#files-input', [
+    path.join(SCRATCH, '.tmp', 'fixtures', 'Artist One - Nice Song.wav'),
+    path.join(SCRATCH, '.tmp', 'fixtures', 'padded.wav'),
+  ]);
+  await page.waitForSelector('#btn-confirm-file', { timeout: 15000 });
+  check('UI fichiers: pas de bouton Précédent sur le 1er fichier', !(await page.isVisible('#btn-prev-file')));
+  // Attendre que la waveform (wavesurfer) soit prête avant de saisir/valider — sinon
+  // collectEditPayload()/wavesurfer.getDuration() lit une durée pas encore décodée.
+  await page.waitForFunction(() => {
+    const b = document.getElementById('sum-bpm')?.textContent;
+    return b && b !== '…';
+  }, { timeout: 30000 });
+  await page.fill('#inp-cuein', '1.5');
+  await page.dispatchEvent('#inp-cuein', 'change');
+  await page.click('#btn-confirm-file');
+  await page.waitForFunction(() => document.querySelector('.card-header')?.textContent.includes('2 / 2'), { timeout: 15000 });
+  const header2 = await page.textContent('.card-header');
+  check('UI fichiers: passage au 2e fichier', header2.includes('2 / 2'), header2);
+  check('UI fichiers: bouton Précédent visible sur le 2e fichier', await page.isVisible('#btn-prev-file'));
+  await page.click('#btn-prev-file');
+  await page.waitForFunction(() => document.querySelector('.card-header')?.textContent.includes('1 / 2'), { timeout: 15000 });
+  const header1 = await page.textContent('.card-header');
+  check('UI fichiers: retour au 1er fichier', header1.includes('1 / 2'), header1);
+  // La restauration (applyStoredCuePoints) se fait dans le callback onReady de wavesurfer
+  // (décodage waveform, asynchrone) — attendre que #sum-cuein s'écarte du texte statique
+  // par défaut du template (00:00.000) plutôt que l'état de #sum-bpm (qui reste "—" aussi
+  // bien avant qu'après une analyse BPM infructueuse sur cette fixture : faux positif).
+  await page.waitForFunction(() => document.getElementById('sum-cuein')?.textContent.trim() !== '00:00.000', { timeout: 15000 });
+  const sumCueInRestored = await page.textContent('#sum-cuein');
+  check('UI fichiers: Précédent restaure le cue point déjà confirmé (pas remis à 00:00.000)',
+    sumCueInRestored.trim() === '00:01.500', sumCueInRestored);
+  check('UI: navigation Précédent sans erreur JS', pageErrors.length === 0, pageErrors.join(' ; '));
 
   // Erreurs JS globales sur tout le parcours
   check('UI: aucune erreur JS sur tout le parcours', pageErrors.length === 0, pageErrors.join(' ; '));
