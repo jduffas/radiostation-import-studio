@@ -35,7 +35,8 @@ const fmt = ms => `${Math.floor(ms / 60000)}:${String(Math.floor((ms % 60000) / 
   }
   console.log(`\n${zones.length} zone(s) sans voix — niveau ${level} — ${((Date.now() - t0) / 1000).toFixed(0)}s d'analyse`);
   for (const z of zones) {
-    console.log(`  ${fmt(z.start_ms)} → ${fmt(z.end_ms)}  (${(z.duration_ms / 1000).toFixed(1)}s, ${z.kind}, voix à ${z.avg_rms_db} dB du mix)`);
+    const beat = z.bpm ? `, bornes calées sur la grille ${z.bpm} BPM` : '';
+    console.log(`  ${fmt(z.start_ms)} → ${fmt(z.end_ms)}  (${(z.duration_ms / 1000).toFixed(1)}s, ${z.kind}, score ${z.score}, voix à ${z.avg_rms_db} dB du mix${beat})`);
   }
   process.exit(0);
 })().catch(e => { console.error('ERREUR', e); process.exit(1); });

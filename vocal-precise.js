@@ -343,6 +343,9 @@ function segmentVocalCurve(frames, totalMs) {
     delete z._band; delete z._flux;
   }
 
+  // Étape 3 : calage des bornes sur la grille de temps (si pulsation nette)
+  _snapZonesToBeats(inside, frames, total, edge);
+
   inside.sort((a, b) => (b.score ?? b.duration_ms) - (a.score ?? a.duration_ms));
   return inside.slice(0, 5);
 }
@@ -351,6 +354,123 @@ function _median(vals) {
   if (!vals.length) return null;
   const s = [...vals].sort((a, b) => a - b);
   return s[Math.floor(s.length / 2)];
+}
+
+// ── Étape 3 : grille de temps (tempo + phase) et calage des bornes ───────────
+// La reprise du chant tombe presque toujours sur un temps : accrocher la FIN de
+// zone (= fin du jingle intérieur) au temps le plus proche donne un placement
+// musical propre. Tout est estimé sur l'enveloppe d'attaques (flux spectral)
+// déjà calculée — aucun modèle supplémentaire.
+const BPM_MIN = 70, BPM_MAX = 180;
+const TEMPO_MIN_STRENGTH = 1.35;   // pic d'autocorrélation / moyenne — en dessous : pas de
+                                   // pulsation fiable (rubato, ambient) → aucun calage
+const SNAP_MAX_BEAT = 0.75;        // ne jamais déplacer une borne de plus de ¾ de temps
+const PHASE_WINDOW_MS = 12000;     // phase locale estimée sur ~12 s (dérive de tempo)
+
+/**
+ * Tempo global par autocorrélation de l'enveloppe d'attaques, pondération
+ * harmonique (évite l'erreur d'octave), interpolation parabolique du pic.
+ * @returns {{period_ms:number, bpm:number, strength:number}|null}
+ */
+function estimateTempo(frames) {
+  const flux = frames.map(w => w.flux).filter(Number.isFinite);
+  if (flux.length < 400) return null; // < ~10 s : pas fiable
+  const stepMs = frames.length > 1 ? (frames[frames.length - 1].t_ms - frames[0].t_ms) / (frames.length - 1) : FRAME_MS;
+  const mean = flux.reduce((a, v) => a + v, 0) / flux.length;
+  const e = flux.map(v => v - mean);
+  const lagMin = Math.max(2, Math.round(60000 / BPM_MAX / stepMs));
+  const lagMax = Math.round(60000 / BPM_MIN / stepMs);
+  const acMax = Math.min(e.length - 1, lagMax * 4);
+  const ac = new Float64Array(acMax + 1);
+  for (let lag = lagMin; lag <= acMax; lag++) {
+    let s = 0;
+    for (let t = 0; t + lag < e.length; t++) s += e[t] * e[t + lag];
+    ac[lag] = s / (e.length - lag);
+  }
+  let best = -Infinity, bestLag = 0, sum = 0, cnt = 0;
+  for (let lag = lagMin; lag <= lagMax; lag++) {
+    const l2 = lag * 2, l3 = lag * 3;
+    const score = ac[lag] + 0.5 * (l2 <= acMax ? ac[l2] : 0) + 0.33 * (l3 <= acMax ? ac[l3] : 0);
+    sum += Math.max(0, score); cnt++;
+    if (score > best) { best = score; bestLag = lag; }
+  }
+  if (!bestLag || best <= 0) return null;
+  const strength = best / Math.max(1e-12, sum / cnt);
+  // Affinage de la période : pic re-localisé sur la 4e harmonique de
+  // l'autocorrélation (4× la précision du lag fondamental, la dérive de phase
+  // sur ~12 s passe sous la frame), interpolation parabolique.
+  const parab = (lag) => {
+    let f = lag;
+    if (lag > lagMin && lag < acMax) {
+      const y0 = ac[lag - 1], y1 = ac[lag], y2 = ac[lag + 1];
+      const den = y0 - 2 * y1 + y2;
+      if (Math.abs(den) > 1e-12) f = lag + Math.max(-0.5, Math.min(0.5, 0.5 * (y0 - y2) / den));
+    }
+    return f;
+  };
+  let lagF = parab(bestLag);
+  if (bestLag * 4 + 4 <= acMax) {
+    let b4 = 0, best4 = -Infinity;
+    for (let l = bestLag * 4 - 4; l <= bestLag * 4 + 4; l++) {
+      if (l > 0 && l <= acMax && ac[l] > best4) { best4 = ac[l]; b4 = l; }
+    }
+    if (b4 > 0 && best4 > 0) lagF = parab(b4) / 4;
+  }
+  const period_ms = lagF * stepMs;
+  return { period_ms, bpm: Math.round(60000 / period_ms), strength };
+}
+
+// Phase locale : offset (ms, dans [0, période)) du peigne maximisant l'énergie
+// d'attaques sur la fenêtre de frames [i0, i1]. Retourne un temps de référence
+// absolu (ms) sur lequel tombent les temps : beat_k = ref + k × période.
+function _localBeatRef(frames, i0, i1, periodMs) {
+  const stepMs = frames.length > 1 ? (frames[frames.length - 1].t_ms - frames[0].t_ms) / (frames.length - 1) : FRAME_MS;
+  const periodF = periodMs / stepMs;
+  const nPhase = Math.max(4, Math.round(periodF));
+  let best = -Infinity, bestPhase = 0;
+  for (let p = 0; p < nPhase; p++) {
+    let s = 0, n = 0;
+    for (let k = i0 + p; k <= i1; k += periodF) {
+      const f = frames[Math.round(k)];
+      if (f && Number.isFinite(f.flux)) { s += f.flux; n++; }
+    }
+    if (n >= 3 && s / n > best) { best = s / n; bestPhase = p; }
+  }
+  return frames[Math.min(frames.length - 1, i0 + bestPhase)].t_ms;
+}
+
+function _snapZonesToBeats(zones, frames, total, edge) {
+  const tempo = estimateTempo(frames);
+  if (!tempo || tempo.strength < TEMPO_MIN_STRENGTH) return;
+  const P = tempo.period_ms;
+  const stepMs = frames.length > 1 ? (frames[frames.length - 1].t_ms - frames[0].t_ms) / (frames.length - 1) : FRAME_MS;
+  const idxOf = (ms) => Math.max(0, Math.min(frames.length - 1, Math.round((ms - frames[0].t_ms) / stepMs)));
+  const nearestBeat = (ref, t) => ref + Math.round((t - ref) / P) * P;
+
+  for (const z of zones) {
+    z.bpm = tempo.bpm;
+    // FIN : la vraie reprise du chant est à end + GUARD_MS ; on vise le temps le
+    // plus proche de cette reprise, sans jamais la dépasser (le jingle doit être
+    // fini quand la voix repart) ni sortir de la marge de bord.
+    const onset = z.end_ms + GUARD_MS;
+    const refE = _localBeatRef(frames, idxOf(Math.max(0, z.end_ms - PHASE_WINDOW_MS)), idxOf(z.end_ms), P);
+    let beatE = nearestBeat(refE, onset);
+    if (beatE > onset) beatE -= P;
+    beatE = Math.round(beatE);
+    if (Math.abs(beatE - z.end_ms) <= SNAP_MAX_BEAT * P && beatE <= total - edge && beatE > z.start_ms + MIN_ZONE_MS) {
+      z.end_ms = beatE;
+    }
+    // DÉBUT : temps le plus proche, jamais avant la fin de la phrase chantée
+    // précédente (start − GUARD_MS) ni hors marge.
+    const refS = _localBeatRef(frames, idxOf(z.start_ms), idxOf(Math.min(total, z.start_ms + PHASE_WINDOW_MS)), P);
+    let beatS = nearestBeat(refS, z.start_ms);
+    if (beatS < z.start_ms - GUARD_MS / 2) beatS += P;
+    beatS = Math.round(beatS);
+    if (Math.abs(beatS - z.start_ms) <= SNAP_MAX_BEAT * P && beatS >= edge && beatS < z.end_ms - MIN_ZONE_MS) {
+      z.start_ms = beatS;
+    }
+    z.duration_ms = z.end_ms - z.start_ms;
+  }
 }
 
 // ── Session ORT (cachée entre titres d'un même rip) ──────────────────────────
@@ -469,4 +589,4 @@ async function analyzePrecise(wavPath, durationMs, level, ffmpegPath, settingsDi
   return zones;
 }
 
-module.exports = { isAvailable, ensureModel, analyzePrecise, segmentVocalCurve, MODEL_FILE };
+module.exports = { isAvailable, ensureModel, analyzePrecise, segmentVocalCurve, estimateTempo, MODEL_FILE };

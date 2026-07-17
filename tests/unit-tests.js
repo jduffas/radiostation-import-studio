@@ -168,6 +168,34 @@ TOTAL   46442 [10:19.17]    (audio only)
     zsQ.length === 2 && zsQ[0].start_ms > 35000 && zsQ[0].start_ms < 37000, JSON.stringify(zsQ.map(z => [z.start_ms, z.score])));
   check('vocalZones (rapide): zones scorées', zones.every(z => typeof z.score === 'number' && z.score > 0), JSON.stringify(zones));
 
+  // ---- Étape 3 : grille de temps (estimateTempo) + calage des bornes ----
+  // Enveloppe synthétique : attaques à 120 BPM (période 500 ms), phase 250 ms
+  const beatFrames = [];
+  for (let t = 0; t < 90000; t += 23.2) {
+    const sinceBeat = (t - 250) % 500;
+    const onBeat = sinceBeat >= 0 && sinceBeat < 23.2;
+    const inBridge = t >= 30000 && t < 45000;
+    beatFrames.push({
+      t_ms: t, mix_db: 60,
+      voc_db: inBridge ? 38 : 52,
+      band_db: 50,
+      flux: onBeat ? 0.8 : 0.05,
+    });
+  }
+  const tempo = VP.estimateTempo(beatFrames);
+  check('estimateTempo: ~120 BPM détecté', !!tempo && Math.abs(tempo.bpm - 120) <= 2, JSON.stringify(tempo));
+  check('estimateTempo: pulsation jugée fiable', !!tempo && tempo.strength >= 1.35, JSON.stringify(tempo));
+  const zsB = VP.segmentVocalCurve(beatFrames, 90000);
+  check('snap: 1 zone (pont 30-45s)', zsB.length === 1, JSON.stringify(zsB));
+  // Bornes brutes ≈ 30200/44800 (gardes 200 ms) → calées sur les temps (…250 + k×500)
+  const onGrid = (ms) => Math.abs(((ms - 250) % 500 + 500) % 500) <= 30 || Math.abs(((ms - 250) % 500 + 500) % 500 - 500) <= 30;
+  check('snap: bornes sur la grille de temps', zsB.length === 1 && onGrid(zsB[0].start_ms) && onGrid(zsB[0].end_ms),
+    JSON.stringify(zsB[0]));
+  check('snap: fin ≤ reprise du chant (45s)', zsB.length === 1 && zsB[0].end_ms <= 45000, JSON.stringify(zsB[0]));
+  check('snap: bpm exposé sur la zone', zsB.length === 1 && Math.abs(zsB[0].bpm - 120) <= 2, JSON.stringify(zsB[0]));
+  // Enveloppe plate (pas de pulsation) → aucun calage, pas de bpm
+  check('snap: pas de pulsation → pas de bpm', VP.segmentVocalCurve(mkFrames(t => (t < 20000 || t >= 35000) ? 52 : 38), 60000).every(z => z.bpm === undefined));
+
   // ---- detectEnergyFromMean ----
   check('energy: -5→5, -10→4, -16→3, -22→2, -30→1, null→null',
     M.detectEnergyFromMean(-5) === 5 && M.detectEnergyFromMean(-10) === 4 && M.detectEnergyFromMean(-16) === 3 &&
