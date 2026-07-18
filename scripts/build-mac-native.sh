@@ -195,11 +195,18 @@ if [ "${APPLE_CERT_AVAILABLE:-false}" = "true" ]; then
   for BIN in "$MODS/_bins/ffmpeg" "$MODS/_bins/ffprobe"; do
     [ -f "$BIN" ] && codesign $CSFLAGS "$BIN" && echo "  signé : $BIN"
   done
+  # Tout autre binaire natif dans node_modules (ex. onnxruntime-node : .dylib + .node) : --deep
+  # ne les signe PAS de façon fiable pour des chemins arbitraires hors bundles/frameworks reconnus
+  # (constaté en CI : rejet notarisation "not signed with a valid Developer ID certificate" sur
+  # libonnxruntime*.dylib et onnxruntime_binding.node malgré --deep sur l'app) → signature explicite.
+  while IFS= read -r -d '' NATIVE_BIN; do
+    codesign $CSFLAGS "$NATIVE_BIN" && echo "  signé : $NATIVE_BIN"
+  done < <(find "$MODS" -type f \( -name '*.node' -o -name '*.dylib' \) -print0)
   # node : entitlement allow-jit requis pour le moteur V8
   codesign $CSFLAGS \
     --entitlements "$ROOT_DIR/entitlements.mac.plist" \
     "$APP_BUNDLE/Contents/Resources/node"
-  # App bundle (--deep pour les éventuels autres binaires natifs dans node_modules)
+  # App bundle (--deep en filet de sécurité pour le reste — plist, exécutable Swift, etc.)
   codesign --deep $CSFLAGS \
     --entitlements "$ROOT_DIR/entitlements.mac.plist" \
     "$APP_BUNDLE"
