@@ -1727,6 +1727,9 @@ async function doRip(backendUrl, authToken, trackNumbers = null, trackOverrides 
       // Zones sans voix détectées au rip (si vocal_analysis_enabled) — pré-remplissent le
       // mode « Jingle intérieur » de l'éditeur sans round-trip /rip/analyze-vocal.
       vocalZones: f.meta.vocal_zones || null,
+      // Mesure post-gain de la normalisation auto (si normalize_on_import_enabled) —
+      // pré-remplit l'affichage "Mesuré" de l'outil Volume sans round-trip ni redécodage.
+      loudnessLufs: f.meta.loudness_lufs ?? null,
     }));
     _pendingRip = { backendUrl, authToken, files, rippedPaths };
     return;
@@ -2037,8 +2040,9 @@ const server = http.createServer(async (req, res) => {
       fs.writeFileSync(filePath, filePart.data);
       // Normalisation automatique -14 LUFS (réglage local à l'app) — avant sonde de durée,
       // même ordre que le rip CD ; /files/convert partira ensuite d'un fichier déjà normalisé.
+      let loudnessLufs = null;
       if (loadSettings().normalize_on_import_enabled) {
-        await performAutoNormalize(filePath);
+        loudnessLufs = await performAutoNormalize(filePath);
       }
       const durationSeconds = await probeLocalDurationSeconds(filePath);
       const guessed = parseFilenameTitleArtist(filePart.filename);
@@ -2049,6 +2053,9 @@ const server = http.createServer(async (req, res) => {
         duration_seconds: durationSeconds,
         title: guessed.title,
         artist: guessed.artist,
+        // Mesure post-gain de la normalisation auto (null si désactivée, échec de mesure,
+        // ou gain sous le seuil de skip — pré-remplit l'affichage "Mesuré" côté client.
+        loudness_lufs: loudnessLufs,
       });
     } catch (e) {
       return jsonResp(res, 500, { error: e.message });

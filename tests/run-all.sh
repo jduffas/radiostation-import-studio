@@ -11,7 +11,8 @@ node vocal-analysis-tests.js
 if node -e "require(process.env.PLAYWRIGHT_MODULE || 'playwright')" 2>/dev/null; then
   node ui-tests.js
   node zoom-tests.js
+  node normalize-auto-check.js
 else
-  echo "(ui-tests.js/zoom-tests.js sautés : playwright introuvable — NODE_PATH ou PLAYWRIGHT_MODULE requis)"
+  echo "(ui-tests.js/zoom-tests.js/normalize-auto-check.js sautés : playwright introuvable — NODE_PATH ou PLAYWRIGHT_MODULE requis)"
 fi
 echo "SUITE COMPLÈTE OK"

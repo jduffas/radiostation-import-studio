@@ -518,7 +518,7 @@ function renderTrimming() {
       </div>
     </div>`
 
-  editorContext = { flow: 'cd', trackNumber: track.trackNumber, initialVocalZones: track.vocalZones || null }
+  editorContext = { flow: 'cd', trackNumber: track.trackNumber, initialVocalZones: track.vocalZones || null, initialLoudnessLufs: track.loudnessLufs ?? null }
   // Retour arrière (bouton Précédent) sur une piste déjà validée une fois : restaure les
   // cue points/zone jingle confirmés au lieu de rouvrir à l'état par défaut (signalé :
   // "on ne peut pas revenir en arrière"). Rien de stocké pour un "Passer" (localCuePoints
@@ -602,7 +602,13 @@ function setupTrimWaveform(previewUrl, onReady) {
     disableDragSel: null,
     volumeDb: 0, fadeInMs: 0, fadeInCurve: 'tri', fadeOutMs: 0, fadeOutCurve: 'tri',
     volumePoints: [], // [{timeMs, db}] — courbe d'automation (timeline waveform)
-    normalizeFeedback: '', // texte "Mesuré : X LUFS · Gain : Y dB" affiché après clic Normaliser
+    // Texte "Mesuré : X LUFS · Gain : Y dB" — pré-rempli avec la mesure DB (normalisation
+    // auto à l'import) SANS toucher volumeDb (reste à 0, la courbe ne bouge pas), affiché
+    // dès l'entrée dans l'outil sans attendre un clic sur Normaliser (bug signalé : "je dois
+    // cliquer sur le bouton pour le faire apparaître, et modifier la courbe").
+    normalizeFeedback: editorContext?.initialLoudnessLufs != null
+      ? `Mesuré : ${editorContext.initialLoudnessLufs.toFixed(1)} LUFS · Gain : +0.0 dB`
+      : '',
   }
 
   // Régions créées à la souris en mode montage (enableDragSelection) : adoptées comme
@@ -1212,7 +1218,11 @@ function renderModePanel() {
     const capGain = -1.0 - peak // jamais peak+gain > -1 dBFS
     const capped = rawGain > capGain
     const clamped = Math.max(-24, Math.min(24, capped ? capGain : rawGain))
-    trimMarkers.volumeDb = Math.round(clamped * 10) / 10
+    // Sous ce seuil, pas de gain appliqué — même valeur que le skip d'idempotence du
+    // service de normalisation auto (main.js::performAutoNormalize / audio_normalize.py
+    // côté backend) : un fichier déjà normalisé ne doit pas voir sa courbe bouger pour une
+    // correction négligeable (résidu d'écart entre les 2 mesures LUFS indépendantes).
+    trimMarkers.volumeDb = Math.abs(clamped) < NORMALIZE_SKIP_THRESHOLD_DB ? 0 : Math.round(clamped * 10) / 10
     trimMarkers.normalizeFeedback =
       `Mesuré : ${lufs.toFixed(1)} LUFS · Gain : ${trimMarkers.volumeDb >= 0 ? '+' : ''}${trimMarkers.volumeDb.toFixed(1)} dB` +
       (capped ? ' (limité par la crête)' : '')
@@ -1328,6 +1338,10 @@ function regionTag(text, color) {
 // site `audio.normalize_target_lufs`. Constante locale (pas d'accès aux settings du site
 // garanti avant appairage) — cf. PLAN-NORMALIZE-EDITEURS.md.
 const NORMALIZE_TARGET_LUFS = -14
+// Sous ce seuil, clickNormalize n'applique pas de gain (courbe inchangée) — même valeur
+// que le skip d'idempotence de main.js::performAutoNormalize et du backend
+// audio_normalize.py, pour un comportement cohérent sur un fichier déjà normalisé.
+const NORMALIZE_SKIP_THRESHOLD_DB = 0.5
 
 const VOL_DB_MAX = 12
 const VOL_DB_MIN = -60
@@ -2174,7 +2188,7 @@ async function uploadSelectedFiles(fileList) {
         editedOnce: false, // true après un premier "Valider et continuer" (pas "Passer") — cf. bouton Précédent
         bpm: null,
         key: null,
-        loudnessLufs: null,
+        loudnessLufs: up.loudness_lufs ?? null, // mesure post-gain si normalisation auto active
         energy: null,
         startType: null,
         endType: null,
@@ -2244,7 +2258,7 @@ function renderFilesTrimming() {
       </div>
     </div>`
 
-  editorContext = { flow: 'files', fileId: item.id, initialVocalZones: null }
+  editorContext = { flow: 'files', fileId: item.id, initialVocalZones: null, initialLoudnessLufs: item.loudnessLufs ?? null }
   setupTrimWaveform(`/files/preview/${item.id}`, () => {
     // Retour arrière (bouton Précédent) sur un fichier déjà validé une fois : restaure les
     // cue points/zone jingle confirmés au lieu de rouvrir à l'état par défaut (signalé :
