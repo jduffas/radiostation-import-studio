@@ -420,6 +420,33 @@ code {
   font-size: 0.9rem;
 }
 
+.vocal-loading-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 12px;
+  padding: 12px 16px;
+  background: rgba(255, 152, 0, 0.14);
+  border: 1px solid rgba(255, 152, 0, 0.5);
+  border-radius: 6px;
+  color: #ffb74d;
+  font-size: 1rem;
+}
+
+.vocal-spinner {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  border: 3px solid rgba(255, 183, 77, 0.3);
+  border-top-color: #ffb74d;
+  border-radius: 50%;
+  animation: vocal-spin 0.8s linear infinite;
+}
+
+@keyframes vocal-spin {
+  to { transform: rotate(360deg); }
+}
+
 .cut-list {
   display: flex;
   flex-direction: column;

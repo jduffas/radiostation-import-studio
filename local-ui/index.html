@@ -9,17 +9,9 @@
   <header class="topbar">
     <h1 id="page-title">📥 Import</h1>
     <div class="topbar-right">
-      <label id="vocal-toggle-label" class="vocal-toggle" title="Analyse la piste PENDANT le rip pour que la zone jingle intérieur soit déjà prête en arrivant sur ce mode (sinon calculée à la demande, sans réglage nécessaire)">
+      <label id="vocal-toggle-label" class="vocal-toggle" title="Analyse la piste PENDANT le rip pour que la zone jingle intérieur soit déjà prête en arrivant sur ce mode (sinon calculée à la demande — la précision se règle dans l'onglet « Jingle intérieur » de l'éditeur)">
         <input type="checkbox" id="vocal-toggle">
         Analyse vocale (zones jingle)
-      </label>
-      <label id="vocal-level-label" class="vocal-toggle" title="Précision de la détection des zones sans voix, sur CETTE machine. Rapide : filtres audio, ~2 s par titre. Précis : séparation de la voix par réseau de neurones (modèle ~64 Mo téléchargé au premier usage), de l'ordre de la minute par titre selon le processeur — Éco n'utilise que la moitié des cœurs pour garder la machine fluide.">
-        Précision
-        <select id="vocal-level">
-          <option value="fast">Rapide</option>
-          <option value="precise">Précise (IA)</option>
-          <option value="precise_eco">Précise éco (IA, CPU limité)</option>
-        </select>
       </label>
       <label id="fast-rip-label" class="vocal-toggle" title="Rip plus rapide, sans correction d'erreur/jitter — à réserver aux CD en bon état">
         <input type="checkbox" id="fast-rip-toggle">

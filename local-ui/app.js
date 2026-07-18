@@ -13,7 +13,6 @@ const $app = document.getElementById('app')
 const $pairingIndicator = document.getElementById('pairing-indicator')
 const $vocalToggle = document.getElementById('vocal-toggle')
 const $vocalToggleLabel = document.getElementById('vocal-toggle-label')
-const $vocalLevel = document.getElementById('vocal-level')
 const $fastRipToggle = document.getElementById('fast-rip-toggle')
 const $fastRipLabel = document.getElementById('fast-rip-label')
 const $pageTitle = document.getElementById('page-title')
@@ -131,7 +130,6 @@ async function init() {
   }
   updatePairingIndicator()
   $vocalToggle.checked = !!settings.vocal_analysis_enabled
-  $vocalLevel.value = settings.vocal_analysis_level || 'fast'
   $fastRipToggle.checked = !!settings.fast_rip_enabled
   if (!settings.server_url || !settings.device_token) {
     stopPolling()
@@ -207,21 +205,6 @@ $fastRipToggle.onchange = async () => {
     })
   } catch (e) {
     $fastRipToggle.checked = !enabled // revert
-    alert("Impossible de sauvegarder le réglage : " + e.message)
-  }
-}
-
-$vocalLevel.onchange = async () => {
-  const level = $vocalLevel.value
-  try {
-    settings = await api('/settings', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ vocal_analysis_level: level }),
-    })
-    if ((settings.vocal_analysis_level || 'fast') !== level) throw new Error('valeur refusée')
-  } catch (e) {
-    $vocalLevel.value = settings.vocal_analysis_level || 'fast' // revert
     alert("Impossible de sauvegarder le réglage : " + e.message)
   }
 }
@@ -1049,15 +1032,30 @@ function renderModePanel() {
   }
 
   if (mode === 'jingle') {
+    // Analyse en cours : bannière seule, AU-DESSUS de tout le reste — aucun contrôle du
+    // mode (précision, suggestion, pose/suppression manuelle) n'est rendu tant qu'elle
+    // tourne, pour qu'aucune action ne puisse s'exécuter en même temps (signalé : le
+    // réglage précision et les boutons restaient cliquables pendant l'analyse, et le texte
+    // d'état, en petit à côté des boutons, passait inaperçu).
+    if (trimMarkers.vocalLoading) {
+      $panel.innerHTML = `
+        <div class="vocal-loading-banner" role="status" aria-live="polite">
+          <span class="vocal-spinner" aria-hidden="true"></span>
+          <strong>Analyse de la voix en cours…</strong> merci de patienter, la piste est en cours de traitement.
+        </div>
+        <p class="hint mode-hint">
+          <strong>Zone verte (JINGLE)</strong> : passage sans voix où la radio pourra superposer
+          un jingle pendant la diffusion (« jingle intérieur »).
+        </p>`
+      return
+    }
     const hasZone = trimMarkers.overlayStart != null
     const zones = trimMarkers.vocalZones
-    const detectInfo = trimMarkers.vocalLoading
-      ? '⏳ Analyse de la voix en cours…'
-      : zones === null
-        ? ''
-        : zones.length
-          ? `${zones.length} passage(s) sans voix détecté(s).`
-          : 'Aucun passage sans voix détecté sur cette piste.'
+    const detectInfo = zones === null
+      ? ''
+      : zones.length
+        ? `${zones.length} passage(s) sans voix détecté(s).`
+        : 'Aucun passage sans voix détecté sur cette piste.'
     $panel.innerHTML = `
       <p class="hint mode-hint">
         <strong>Zone verte (JINGLE)</strong> : passage sans voix où la radio pourra superposer
@@ -1065,7 +1063,17 @@ function renderModePanel() {
         Enregistrée à l'import, modifiable ensuite sur le site.
       </p>
       <div class="panel-row">
-        <button class="btn-ctrl" id="btn-overlay-suggest" ${trimMarkers.vocalLoading || !(zones && zones.length) ? 'disabled' : ''}>📢 Proposer depuis la voix détectée</button>
+        <label class="panel-field" id="vocal-level-label" title="Précision de la détection des zones sans voix, sur CETTE machine. Rapide : filtres audio, ~2 s par titre. Précis : séparation de la voix par réseau de neurones (modèle ~64 Mo téléchargé au premier usage), de l'ordre de la minute par titre selon le processeur — Éco n'utilise que la moitié des cœurs pour garder la machine fluide. S'applique à la prochaine analyse (celle-ci est déjà terminée)."
+          >Précision
+          <select id="vocal-level">
+            <option value="fast">Rapide</option>
+            <option value="precise">Précise (IA)</option>
+            <option value="precise_eco">Précise éco (IA, CPU limité)</option>
+          </select>
+        </label>
+      </div>
+      <div class="panel-row">
+        <button class="btn-ctrl" id="btn-overlay-suggest" ${!(zones && zones.length) ? 'disabled' : ''} title="Recale la zone verte sur le passage sans voix le plus pertinent détecté par l'analyse">✨ Appliquer la zone suggérée</button>
         <button class="btn-ctrl" id="btn-overlay-add" ${hasZone ? 'disabled' : ''} title="Pose une zone de 8 s à la position de lecture">➕ Poser une zone</button>
         <button class="btn-ctrl" id="btn-overlay-remove" ${hasZone ? '' : 'disabled'}>Supprimer la zone</button>
         <span class="panel-info" id="overlay-info"></span>
@@ -1078,6 +1086,24 @@ function renderModePanel() {
     if ($add) $add.onclick = addManualOverlayZone
     const $remove = document.getElementById('btn-overlay-remove')
     if ($remove) $remove.onclick = removeOverlayZone
+    const $level = document.getElementById('vocal-level')
+    if ($level) {
+      $level.value = settings.vocal_analysis_level || 'fast'
+      $level.onchange = async () => {
+        const level = $level.value
+        try {
+          settings = await api('/settings', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ vocal_analysis_level: level }),
+          })
+          if ((settings.vocal_analysis_level || 'fast') !== level) throw new Error('valeur refusée')
+        } catch (e) {
+          $level.value = settings.vocal_analysis_level || 'fast' // revert
+          alert("Impossible de sauvegarder le réglage : " + e.message)
+        }
+      }
+    }
     return
   }
 
