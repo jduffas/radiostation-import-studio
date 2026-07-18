@@ -234,11 +234,22 @@ python3 -m venv "$DMGBUILD_VENV"
 # si l'app n'a pas été signée avec un vrai Developer ID (APPLE_CERT_AVAILABLE != true ci-dessus).
 if [ "${APPLE_CERT_AVAILABLE:-false}" = "true" ] && [ -n "${APPLE_ID:-}" ] && [ -n "${APPLE_APP_SPECIFIC_PASSWORD:-}" ] && [ -n "${APPLE_TEAM_ID:-}" ]; then
   echo "→ Notarisation (xcrun notarytool)..."
-  xcrun notarytool submit "$DMG_PATH" \
+  NOTARY_JSON=$(xcrun notarytool submit "$DMG_PATH" \
     --apple-id "$APPLE_ID" \
     --password "$APPLE_APP_SPECIFIC_PASSWORD" \
     --team-id "$APPLE_TEAM_ID" \
-    --wait
+    --wait --output-format json)
+  echo "$NOTARY_JSON"
+  SUBMISSION_ID=$(echo "$NOTARY_JSON" | node -e "process.stdout.write(JSON.parse(require('fs').readFileSync(0,'utf8')).id)")
+  NOTARY_STATUS=$(echo "$NOTARY_JSON" | node -e "process.stdout.write(JSON.parse(require('fs').readFileSync(0,'utf8')).status)")
+  if [ "$NOTARY_STATUS" != "Accepted" ]; then
+    echo "ERREUR : notarisation refusée ($NOTARY_STATUS) — log détaillé :"
+    xcrun notarytool log "$SUBMISSION_ID" \
+      --apple-id "$APPLE_ID" \
+      --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+      --team-id "$APPLE_TEAM_ID"
+    exit 1
+  fi
   echo "→ Stapling du ticket de notarisation..."
   xcrun stapler staple "$DMG_PATH"
 else
