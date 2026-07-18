@@ -62,6 +62,16 @@ const localCuePoints = {}
 let sendResults = [] // [{status:'pending'|'sending'|'done'|'error', error, title, artist, album, year}]
 
 let wavesurfer = null // instance courante (une piste à la fois, détruite entre les pistes)
+let previewBlobUrl = null // blob URL du média chargé dans wavesurfer, à révoquer à chaque changement
+
+// Détruit l'instance wavesurfer courante et révoque son blob URL — remplace les
+// `if (wavesurfer) { wavesurfer.destroy(); wavesurfer = null }` isolés qui, avant le passage
+// en blob (fix du blanc au seek pendant la lecture d'une coupe, cf. setupTrimWaveform),
+// auraient sinon accumulé les blob URLs sans jamais les libérer.
+function destroyWavesurfer() {
+  if (wavesurfer) { wavesurfer.destroy(); wavesurfer = null }
+  if (previewBlobUrl) { URL.revokeObjectURL(previewBlobUrl); previewBlobUrl = null }
+}
 
 // ---- État du flux "fichiers locaux" hors CD (Phase 4) ----
 // Entièrement piloté côté client : contrairement au rip CD (lecture disque potentiellement
@@ -159,7 +169,7 @@ function enterFilesMode() {
 
 function backToModeSelector() {
   stopPolling()
-  if (wavesurfer) { wavesurfer.destroy(); wavesurfer = null }
+  destroyWavesurfer()
   appMode = null
   updatePageTitle()
   render()
@@ -564,22 +574,10 @@ function applyZoom(level) {
 // change. `onReady` optionnel : callback additionnel une fois la waveform décodée (utilisé
 // par le flux fichiers locaux pour lancer l'analyse BPM/tonalité côté client, cf. analyzeBpmKey).
 function setupTrimWaveform(previewUrl, onReady) {
-  if (wavesurfer) { wavesurfer.destroy(); wavesurfer = null }
+  destroyWavesurfer()
   volOverlay = null // le DOM #waveform est recréé à chaque piste/fichier
   fadeOverlay = null
   const regions = RegionsPlugin.create()
-  wavesurfer = WaveSurfer.create({
-    container: '#waveform',
-    waveColor: '#4a90e2',
-    progressColor: '#2c5aa0',
-    cursorColor: '#e0e0e0',
-    height: 140,
-    barWidth: 2,
-    barGap: 1,
-    normalize: true,
-    plugins: [regions],
-    url: previewUrl,
-  })
 
   trimMarkers = {
     trimStart: 0, trimEnd: 0, cueInPos: 0, cueOutPos: 0,
@@ -609,48 +607,6 @@ function setupTrimWaveform(previewUrl, onReady) {
     adoptCutRegion(region)
   })
 
-  wavesurfer.on('ready', () => {
-    const dur = wavesurfer.getDuration()
-    // Affiche la durée totale dès le décodage — 'timeupdate' ne se déclenche qu'à la
-    // lecture, le compteur restait sinon à 00:00.000 / 00:00.000 tant qu'on ne jouait pas.
-    const $time = document.getElementById('time-display')
-    if ($time) $time.textContent = `${formatTime(0)} / ${formatTime(dur)}`
-    const containerWidth = document.getElementById('waveform')?.clientWidth || 0
-    // -1px de marge : évite qu'un arrondi ceil() interne à wavesurfer (scrollWidth vs
-    // clientWidth) ne déclenche une barre de scroll fantôme dès le niveau ×1 (fit exact).
-    waveZoom.fitPxPerSec = dur > 0 && containerWidth > 1 ? (containerWidth - 1) / dur : 0
-    applyZoom(1)
-    trimMarkers.trimStart = 0
-    trimMarkers.trimEnd = dur
-    trimMarkers.cueInPos = 0
-    trimMarkers.cueOutPos = dur
-    trimMarkers.introPos = 0
-    trimMarkers.keepRegion = regions.addRegion({ id: 'trim-keep', start: 0, end: dur, color: 'rgba(74,144,226,0.15)', drag: true, resize: true })
-    trimMarkers.cueInRegion = regions.addRegion({ id: 'cue-in', start: 0, color: 'rgba(33,150,243,0.9)', drag: true, resize: false, content: markerLabel('DÉBUT', '#2196f3') })
-    // Étiquette INTRO décalée verticalement (top 26px) : DÉBUT et INTRO démarrent tous
-    // deux à 0 — sans décalage, une étiquette masquerait l'autre et volerait son drag
-    // (même problème que SKIP/INTRO superposés dans l'éditeur du site).
-    trimMarkers.introRegion = regions.addRegion({ id: 'intro-end', start: 0, color: 'rgba(255,152,0,0.9)', drag: true, resize: false, content: markerLabel('INTRO', '#ff9800', 26) })
-    trimMarkers.cueOutRegion = regions.addRegion({ id: 'cue-out', start: dur, color: 'rgba(244,67,54,0.9)', drag: true, resize: false, content: markerLabel('TRANSITION', '#f44336') })
-    // Applique l'interactivité du mode courant (les régions viennent seulement d'exister) —
-    // en mode 'cue' par défaut, comportement identique à avant l'éditeur unifié.
-    ensureVolumeOverlay()
-    updateVolumeOverlayVisibility()
-    ensureFadeOverlay()
-    updateFadeOverlayVisibility()
-    setEditorMode(trimMarkers.mode)
-    updateSummary()
-    onReady?.()
-  })
-
-  wavesurfer.on('timeupdate', (t) => {
-    document.getElementById('time-display').textContent = `${formatTime(t)} / ${formatTime(wavesurfer.getDuration())}`
-    // Toujours appelée (pas seulement si volumePoints.length) : sinon un fondu réglé sans
-    // courbe de volume ne s'entendait jamais à la lecture — se réduit naturellement au
-    // volume de base quand ni fondu ni courbe ne sont actifs (gains à 1.0).
-    updatePreviewVolume(t)
-  })
-
   regions.on('region-updated', onRegionMoved)
   regions.on('region-update', onRegionMoved)
 
@@ -668,22 +624,96 @@ function setupTrimWaveform(previewUrl, onReady) {
     }
   })
 
-  document.getElementById('btn-playpause').onclick = () => wavesurfer.playPause()
-  document.getElementById('btn-stop').onclick = () => wavesurfer.stop()
+  // Ces gestionnaires lisent `wavesurfer` (variable de module) au moment du CLIC, pas à
+  // l'attache — safe même si l'instance n'existe pas encore (chargement blob ci-dessous).
+  document.getElementById('btn-playpause').onclick = () => wavesurfer?.playPause()
+  document.getElementById('btn-stop').onclick = () => wavesurfer?.stop()
   document.getElementById('btn-zoom-in').onclick = () => applyZoom(waveZoom.level * 2)
   document.getElementById('btn-zoom-out').onclick = () => applyZoom(waveZoom.level / 2)
   document.getElementById('btn-zoom-reset').onclick = () => applyZoom(1)
   document.getElementById('btn-preview-start').onclick = () => {
+    if (!wavesurfer) return
     wavesurfer.setTime(trimMarkers.cueInPos)
     wavesurfer.play()
     setTimeout(() => wavesurfer?.pause(), 3000)
   }
   document.getElementById('btn-preview-end').onclick = () => {
+    if (!wavesurfer) return
     const from = Math.max(trimMarkers.cueOutPos - 3, trimMarkers.trimStart)
     wavesurfer.setTime(from)
     wavesurfer.play()
     setTimeout(() => wavesurfer?.pause(), 3000)
   }
+
+  // Chargement en blob (parité avec le site, cf. useWaveSurferInstance.ts) plutôt qu'une
+  // `url` directe vers le serveur local de main.js : celui-ci répond TOUJOURS 200 complet
+  // sans support des requêtes Range (`/rip-preview`, `/files/preview`) — un `setTime()` vers
+  // un point pas encore reçu pendant la lecture (cf. region-in ci-dessus, saut de coupe)
+  // devait re-bufferiser jusqu'au point de seek = blanc audible, signalé. Le média entier en
+  // mémoire (blob) rend `setTime()` instantané, comme le site.
+  fetch(previewUrl)
+    .then((r) => r.blob())
+    .then((blob) => {
+      previewBlobUrl = URL.createObjectURL(blob)
+      wavesurfer = WaveSurfer.create({
+        container: '#waveform',
+        waveColor: '#4a90e2',
+        progressColor: '#2c5aa0',
+        cursorColor: '#e0e0e0',
+        height: 140,
+        barWidth: 2,
+        barGap: 1,
+        normalize: true,
+        plugins: [regions],
+        url: previewBlobUrl,
+      })
+
+      wavesurfer.on('ready', () => {
+        const dur = wavesurfer.getDuration()
+        // Affiche la durée totale dès le décodage — 'timeupdate' ne se déclenche qu'à la
+        // lecture, le compteur restait sinon à 00:00.000 / 00:00.000 tant qu'on ne jouait pas.
+        const $time = document.getElementById('time-display')
+        if ($time) $time.textContent = `${formatTime(0)} / ${formatTime(dur)}`
+        const containerWidth = document.getElementById('waveform')?.clientWidth || 0
+        // -1px de marge : évite qu'un arrondi ceil() interne à wavesurfer (scrollWidth vs
+        // clientWidth) ne déclenche une barre de scroll fantôme dès le niveau ×1 (fit exact).
+        waveZoom.fitPxPerSec = dur > 0 && containerWidth > 1 ? (containerWidth - 1) / dur : 0
+        applyZoom(1)
+        trimMarkers.trimStart = 0
+        trimMarkers.trimEnd = dur
+        trimMarkers.cueInPos = 0
+        trimMarkers.cueOutPos = dur
+        trimMarkers.introPos = 0
+        trimMarkers.keepRegion = regions.addRegion({ id: 'trim-keep', start: 0, end: dur, color: 'rgba(74,144,226,0.15)', drag: true, resize: true })
+        trimMarkers.cueInRegion = regions.addRegion({ id: 'cue-in', start: 0, color: 'rgba(33,150,243,0.9)', drag: true, resize: false, content: markerLabel('DÉBUT', '#2196f3') })
+        // Étiquette INTRO décalée verticalement (top 26px) : DÉBUT et INTRO démarrent tous
+        // deux à 0 — sans décalage, une étiquette masquerait l'autre et volerait son drag
+        // (même problème que SKIP/INTRO superposés dans l'éditeur du site).
+        trimMarkers.introRegion = regions.addRegion({ id: 'intro-end', start: 0, color: 'rgba(255,152,0,0.9)', drag: true, resize: false, content: markerLabel('INTRO', '#ff9800', 26) })
+        trimMarkers.cueOutRegion = regions.addRegion({ id: 'cue-out', start: dur, color: 'rgba(244,67,54,0.9)', drag: true, resize: false, content: markerLabel('TRANSITION', '#f44336') })
+        // Applique l'interactivité du mode courant (les régions viennent seulement d'exister) —
+        // en mode 'cue' par défaut, comportement identique à avant l'éditeur unifié.
+        ensureVolumeOverlay()
+        updateVolumeOverlayVisibility()
+        ensureFadeOverlay()
+        updateFadeOverlayVisibility()
+        setEditorMode(trimMarkers.mode)
+        updateSummary()
+        onReady?.()
+      })
+
+      wavesurfer.on('timeupdate', (t) => {
+        document.getElementById('time-display').textContent = `${formatTime(t)} / ${formatTime(wavesurfer.getDuration())}`
+        // Toujours appelée (pas seulement si volumePoints.length) : sinon un fondu réglé sans
+        // courbe de volume ne s'entendait jamais à la lecture — se réduit naturellement au
+        // volume de base quand ni fondu ni courbe ne sont actifs (gains à 1.0).
+        updatePreviewVolume(t)
+      })
+    })
+    .catch((err) => {
+      console.error('[setupTrimWaveform] chargement audio échoué', err)
+      alert("Impossible de charger l'aperçu audio : " + err.message)
+    })
 }
 
 function markerLabel(text, color, top = 2) {
@@ -1790,7 +1820,7 @@ async function advanceTrimming(data) {
 
   const isLast = trimIndex >= pending.length - 1
   if (isLast) {
-    if (wavesurfer) { wavesurfer.destroy(); wavesurfer = null }
+    destroyWavesurfer()
     $app.innerHTML = '<div class="card"><div class="card-body"><p class="loading">Envoi en cours…</p></div></div>'
     try {
       await api('/rip/confirm', { method: 'POST' })
@@ -2204,7 +2234,7 @@ async function advanceFilesTrimming(data) {
 
   const isLast = filesEditingIndex >= filesItems.length - 1
   if (isLast) {
-    if (wavesurfer) { wavesurfer.destroy(); wavesurfer = null }
+    destroyWavesurfer()
     await finishFilesUpload()
     return
   }
