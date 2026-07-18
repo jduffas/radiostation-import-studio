@@ -92,8 +92,13 @@ async function j(url, opts) {
   // ── Settings ──
   let s = await j(`${BASE}/settings`);
   check('GET /settings défauts', s.status === 200 && s.body.vocal_analysis_enabled === false && s.body.fast_rip_enabled === false, JSON.stringify(s.body));
+  check('GET /settings normalize_on_import_enabled actif par défaut', s.body.normalize_on_import_enabled === true, JSON.stringify(s.body));
   s = await j(`${BASE}/settings`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ vocal_analysis_enabled: 'yes', ignored_key: 123 }) });
   check('POST /settings coercition bool + clé inconnue ignorée', s.body.vocal_analysis_enabled === true && s.body.ignored_key === undefined, JSON.stringify(s.body));
+  s = await j(`${BASE}/settings`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ normalize_on_import_enabled: false }) });
+  check('POST /settings désactive normalize_on_import_enabled', s.body.normalize_on_import_enabled === false, JSON.stringify(s.body));
+  s = await j(`${BASE}/settings`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ normalize_on_import_enabled: true }) });
+  check('POST /settings réactive normalize_on_import_enabled', s.body.normalize_on_import_enabled === true, JSON.stringify(s.body));
   s = await j(`${BASE}/settings`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ vocal_analysis_level: 'precise_eco' }) });
   check('POST /settings niveau analyse accepté', s.body.vocal_analysis_level === 'precise_eco', JSON.stringify(s.body));
   s = await j(`${BASE}/settings`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ vocal_analysis_level: 'turbo' }) });

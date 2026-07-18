@@ -109,14 +109,22 @@ const SETTINGS_PATH = path.join(SETTINGS_DIR, 'settings.json');
 // l'app. Jamais écrit ; la prochaine sauvegarde va dans SETTINGS_PATH.
 const LEGACY_SETTINGS_PATH = path.join(os.homedir(), '.radiostation-cd-ripper', 'settings.json');
 
+// Valeurs par défaut fusionnées à la lecture — garantit qu'un settings.json déjà existant
+// (créé par une version antérieure de l'app, sans cette clé) active quand même la
+// normalisation auto par défaut, au lieu de la voir retomber à `undefined` (falsy).
+const DEFAULT_SETTINGS = {
+  vocal_analysis_enabled: false, fast_rip_enabled: false, vocal_analysis_level: 'fast',
+  normalize_on_import_enabled: true,
+};
+
 function loadSettings() {
   try {
-    return JSON.parse(fs.readFileSync(SETTINGS_PATH, 'utf8'));
+    return { ...DEFAULT_SETTINGS, ...JSON.parse(fs.readFileSync(SETTINGS_PATH, 'utf8')) };
   } catch {
     try {
-      return JSON.parse(fs.readFileSync(LEGACY_SETTINGS_PATH, 'utf8'));
+      return { ...DEFAULT_SETTINGS, ...JSON.parse(fs.readFileSync(LEGACY_SETTINGS_PATH, 'utf8')) };
     } catch {
-      return { vocal_analysis_enabled: false, fast_rip_enabled: false, vocal_analysis_level: 'fast' };
+      return { ...DEFAULT_SETTINGS };
     }
   }
 }
@@ -1503,6 +1511,33 @@ function detectLoudnessLufs(filePath) {
   });
 }
 
+// Normalisation automatique à l'import — réglage local à l'app (`normalize_on_import_enabled`,
+// indépendant du réglage équivalent côté site : pas d'appairage réseau garanti au lancement).
+// Même logique de gain que le service backend `audio_normalize.py::normalize_file_sync` :
+// mesure ebur128 + cap anti-écrêtage (peak+gain <= -1 dBFS) + clamp ±24 dB + skip sous 0,5 dB
+// (idempotence — un fichier déjà normalisé ici, ou déjà proche de la cible, n'est pas
+// re-encodé une seconde fois côté backend à l'upload). Réutilise applyAudioEdit (même chemin
+// ffmpeg testé que le bouton manuel « Normaliser » / le montage), pas de pipeline dupliqué.
+const AUTO_NORMALIZE_TARGET_LUFS = -14;
+const AUTO_NORMALIZE_SKIP_THRESHOLD_DB = 0.5;
+
+async function performAutoNormalize(filePath) {
+  try {
+    const [lufs, stats] = await Promise.all([detectLoudnessLufs(filePath), getVolumeStats(filePath)]);
+    if (lufs == null) return null;
+    const rawGain = AUTO_NORMALIZE_TARGET_LUFS - lufs;
+    const capGain = stats?.max != null ? (-1.0 - stats.max) : rawGain;
+    let gain = Math.min(rawGain, capGain);
+    gain = Math.max(-24, Math.min(24, gain));
+    if (Math.abs(gain) < AUTO_NORMALIZE_SKIP_THRESHOLD_DB) return null;
+    await applyAudioEdit(filePath, { volume_db: gain });
+    return await detectLoudnessLufs(filePath);
+  } catch (e) {
+    console.error('[autoNormalize]', e.message);
+    return null;
+  }
+}
+
 // Port de audio_analysis.py::_detect_energy (calibrage RMS moyen → échelle 1-5).
 function detectEnergyFromMean(meanDb) {
   if (meanDb == null) return null;
@@ -1616,7 +1651,7 @@ async function doRip(backendUrl, authToken, trackNumbers = null, trackOverrides 
 
     for (let i = 0; i < tracksToRip.length; i++) {
       ripState.currentTrack = i + 1;
-      ripState.progress = Math.round((i / tracksToRip.length) * 70);
+      ripState.progress = Math.round((i / tracksToRip.length) * 60); // 0→60 %
 
       const tnum = tracksToRip[i].number;
       const fname = `track${String(tnum).padStart(2, '0')}.wav`;
@@ -1644,6 +1679,19 @@ async function doRip(backendUrl, authToken, trackNumbers = null, trackOverrides 
           mbid: tMeta.mbid || null,
         },
       });
+    }
+
+    // ---- Normalisation automatique -14 LUFS (optionnelle, réglage local à l'app) ----
+    // Faite ici (après écriture, avant l'analyse vocale) — même ordre que le service
+    // backend `audio_normalize.py` côté site.
+    if (loadSettings().normalize_on_import_enabled) {
+      ripState.status = 'normalizing';
+      for (let i = 0; i < files.length; i++) {
+        ripState.currentTrack = i + 1;
+        ripState.progress = 60 + Math.round((i / files.length) * 10); // 60→70 %
+        const normalizedLufs = await performAutoNormalize(files[i].filePath);
+        if (normalizedLufs != null) files[i].meta.loudness_lufs = normalizedLufs;
+      }
     }
 
     ripState.progress = 70;
@@ -1987,6 +2035,11 @@ const server = http.createServer(async (req, res) => {
       fs.mkdirSync(dir, { recursive: true });
       const filePath = path.join(dir, `original${ext}`);
       fs.writeFileSync(filePath, filePart.data);
+      // Normalisation automatique -14 LUFS (réglage local à l'app) — avant sonde de durée,
+      // même ordre que le rip CD ; /files/convert partira ensuite d'un fichier déjà normalisé.
+      if (loadSettings().normalize_on_import_enabled) {
+        await performAutoNormalize(filePath);
+      }
       const durationSeconds = await probeLocalDurationSeconds(filePath);
       const guessed = parseFilenameTitleArtist(filePart.filename);
       _localFiles.set(id, { dir, filePath, ext, originalName: filePart.filename, convertedPath: null });
@@ -2344,6 +2397,7 @@ const server = http.createServer(async (req, res) => {
       if (payload.vocal_analysis_enabled !== undefined) updates.vocal_analysis_enabled = !!payload.vocal_analysis_enabled;
       if (payload.vocal_analysis_level !== undefined && ['fast', 'precise', 'precise_eco'].includes(payload.vocal_analysis_level)) updates.vocal_analysis_level = payload.vocal_analysis_level;
       if (payload.fast_rip_enabled !== undefined) updates.fast_rip_enabled = !!payload.fast_rip_enabled;
+      if (payload.normalize_on_import_enabled !== undefined) updates.normalize_on_import_enabled = !!payload.normalize_on_import_enabled;
       if (payload.server_url !== undefined) updates.server_url = String(payload.server_url);
       if (payload.device_token !== undefined) updates.device_token = String(payload.device_token);
       const s = saveSettings(updates);

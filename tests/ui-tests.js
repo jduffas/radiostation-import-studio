@@ -34,8 +34,12 @@ async function waitUp(url, ms = 8000) {
   fs.mkdirSync(TMP, { recursive: true });
   fs.mkdirSync(path.join(HOME, '.radiostation-import-studio'), { recursive: true });
   // Appairage pré-rempli (sinon écran "non connectée")
+  // normalize_on_import_enabled: false — sinon l'upload de fixture (Phase 4) serait
+  // auto-normalisé à -14 LUFS avant même le clic sur le bouton manuel « Normaliser » plus
+  // bas, qui a justement besoin d'un fichier resté à son niveau d'origine pour vérifier son
+  // propre calcul de gain (test dédié, distinct de la normalisation auto à l'import).
   fs.writeFileSync(path.join(HOME, '.radiostation-import-studio', 'settings.json'),
-    JSON.stringify({ vocal_analysis_enabled: false, fast_rip_enabled: false, server_url: STUB, device_token: 'tok-ui' }));
+    JSON.stringify({ vocal_analysis_enabled: false, fast_rip_enabled: false, normalize_on_import_enabled: false, server_url: STUB, device_token: 'tok-ui' }));
 
   const stub = spawn('node', [path.join(SCRATCH, 'stub-backend.js')], { stdio: 'ignore', env: { ...process.env, STUB_PORT: String(STUB_PORT) } });
   const srv = spawn('node', ['main.js'], {

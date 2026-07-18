@@ -16,6 +16,7 @@ const $vocalToggle = document.getElementById('vocal-toggle')
 const $vocalToggleLabel = document.getElementById('vocal-toggle-label')
 const $fastRipToggle = document.getElementById('fast-rip-toggle')
 const $fastRipLabel = document.getElementById('fast-rip-label')
+const $normalizeToggle = document.getElementById('normalize-toggle')
 const $pageTitle = document.getElementById('page-title')
 
 // Titre/en-tête dynamiques selon le mode choisi — l'app n'est plus limitée au CD depuis
@@ -132,6 +133,10 @@ async function init() {
   updatePairingIndicator()
   $vocalToggle.checked = !!settings.vocal_analysis_enabled
   $fastRipToggle.checked = !!settings.fast_rip_enabled
+  // Actif par défaut (undefined → true) — cohérent avec le réglage équivalent côté site
+  // (`audio.normalize_on_import`, défaut true) et avec le fallback DEFAULT_SETTINGS du main
+  // process pour les installs déjà existantes sans cette clé.
+  $normalizeToggle.checked = settings.normalize_on_import_enabled !== false
   if (!settings.server_url || !settings.device_token) {
     stopPolling()
     localView = 'not-paired'
@@ -210,6 +215,20 @@ $fastRipToggle.onchange = async () => {
   }
 }
 
+$normalizeToggle.onchange = async () => {
+  const enabled = $normalizeToggle.checked
+  try {
+    settings = await api('/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ normalize_on_import_enabled: enabled }),
+    })
+  } catch (e) {
+    $normalizeToggle.checked = !enabled // revert
+    alert("Impossible de sauvegarder le réglage : " + e.message)
+  }
+}
+
 async function tick() {
   try {
     cdStatus = await api('/status')
@@ -243,7 +262,7 @@ function render() {
     if (localView === 'toc-error') return renderTocError()
     return renderIdle()
   }
-  if (['detecting', 'ripping', 'analyzing'].includes(status)) return renderProgress(status)
+  if (['detecting', 'ripping', 'normalizing', 'analyzing'].includes(status)) return renderProgress(status)
   if (status === 'trimming') return renderTrimming()
   if (status === 'uploading') return renderProgress(status)
   if (status === 'done') return renderFinalize()
@@ -412,6 +431,7 @@ function renderProgress(status) {
   const labels = {
     detecting: 'Lecture de la table des matières…',
     ripping: `Rip piste ${currentRipState.currentTrack}/${currentRipState.totalTracks}`,
+    normalizing: `Normalisation piste ${currentRipState.currentTrack}/${currentRipState.totalTracks}…`,
     analyzing: `Analyse vocale piste ${currentRipState.currentTrack}/${currentRipState.totalTracks}…`,
     uploading: 'Envoi des fichiers vers RadioStation…',
   }
