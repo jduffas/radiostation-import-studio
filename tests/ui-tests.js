@@ -176,6 +176,53 @@ async function waitUp(url, ms = 8000) {
   await page.click('.mode-tab[data-mode="volume"]');
   await page.waitForSelector('#vol-slider', { timeout: 5000 });
   check('UI fichiers: bouton détection silences absent en mode volume', !(await page.isVisible('#btn-auto-cue')));
+
+  // ---- Bouton Normaliser (-14 LUFS) — PLAN-NORMALIZE-EDITEURS.md volet 1 ----
+  // Fixture "Nice Song.wav" = sinus 440Hz 10s, mesuré ffmpeg ebur128 = -21.8 LUFS,
+  // peak -21.1 dBFS → gain attendu = -14-(-21.8) = +7.8 dB, cap anti-crête (+20.1 dB)
+  // non atteint. Bloc isolé : restaure le tool volume à l'état d'avant (slider -6.0,
+  // vérifié plus loin ligne ~257) via #btn-reset avant de continuer le flux existant.
+  check('UI fichiers: bouton Normaliser visible en mode volume', await page.isVisible('#btn-normalize'));
+  const waveformSignatureApp = () => page.evaluate(() => {
+    // wavesurfer rend dans un shadow DOM (élément custom) — querySelector natif ne le
+    // traverse pas (contrairement aux locators Playwright, ex. page.$eval('#waveform audio')
+    // utilisés plus haut) : il faut passer explicitement par .shadowRoot, comme côté site.
+    const host = document.querySelector('#waveform > div');
+    const canvas = host?.shadowRoot?.querySelector('canvas');
+    if (!canvas) return null;
+    const ctx = canvas.getContext('2d');
+    const { width, height } = canvas;
+    const data = ctx.getImageData(0, 0, width, height).data;
+    let sum = 0;
+    for (let i = 0; i < data.length; i += 4) sum += data[i] + data[i + 1] + data[i + 2];
+    return sum;
+  });
+  const sigBeforeNorm = await waveformSignatureApp();
+  await page.click('#btn-normalize');
+  await sleep(200);
+  const normFeedback = await page.textContent('#normalize-feedback');
+  console.log(`      (info) ${normFeedback}`);
+  check('UI fichiers: clic Normaliser affiche mesure/gain', /Mesuré/.test(normFeedback), normFeedback);
+  const gainMatch = normFeedback.match(/Gain\s*:\s*([+-][\d.]+)\s*dB/);
+  const gainShown = gainMatch ? parseFloat(gainMatch[1]) : null;
+  check('UI fichiers: gain Normaliser cohérent (sinus plein volume -21.8 LUFS -> cible -14)',
+    gainShown !== null && Math.abs(gainShown - 7.8) <= 1.5, String(gainShown));
+  check('UI fichiers: #vol-value cohérent avec le gain calculé',
+    gainShown !== null && (await page.textContent('#vol-value')).includes(gainShown.toFixed(1)));
+  const sigAfterNorm = await waveformSignatureApp();
+  check('UI fichiers: waveform redessinée après clic Normaliser (échelle réelle x gain)',
+    sigBeforeNorm !== null && sigAfterNorm !== null && sigBeforeNorm !== sigAfterNorm,
+    `avant=${sigBeforeNorm} après=${sigAfterNorm}`);
+
+  // Réinitialiser (scopé volume) remet le gain à 0 ET restaure l'affichage waveform
+  await page.click('#btn-reset');
+  const volAfterNormReset = await page.textContent('#vol-value');
+  check('UI fichiers: Réinitialiser (scopé volume) remet le gain à 0', volAfterNormReset.includes('0.0'), volAfterNormReset);
+  const sigAfterReset = await waveformSignatureApp();
+  check('UI fichiers: waveform restaurée après Réinitialiser', sigAfterReset !== sigAfterNorm,
+    `après-normalize=${sigAfterNorm} après-reset=${sigAfterReset}`);
+  check('UI fichiers: Normaliser sans erreur JS', pageErrors.length === 0, pageErrors.join(' ; '));
+
   await page.$eval('#vol-slider', el => { el.value = '-6'; el.dispatchEvent(new Event('input')); });
   check('UI fichiers: mode volume, -6.0 dB affiché', (await page.textContent('#vol-value')).includes('-6.0'));
   // Courbe d'automation (v1.9) : zoom verrouillé + clic sur la ligne → point ajouté

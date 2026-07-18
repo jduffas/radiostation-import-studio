@@ -8,6 +8,7 @@ import WaveSurfer from './vendor/wavesurfer.esm.js'
 import RegionsPlugin from './vendor/regions.esm.js'
 import aubioFactory from './vendor/aubio.esm.js'
 import { keyFromChroma } from './vendor/key-detect.js'
+import { integratedLufs, peakDbfs } from './loudness.js'
 
 const $app = document.getElementById('app')
 const $pairingIndicator = document.getElementById('pairing-indicator')
@@ -560,6 +561,8 @@ function setupTrimWaveform(previewUrl, onReady) {
   destroyWavesurfer()
   volOverlay = null // le DOM #waveform est recréé à chaque piste/fichier
   fadeOverlay = null
+  volBasePeaks = null
+  volOriginalBuffer = null
   const regions = RegionsPlugin.create()
 
   trimMarkers = {
@@ -579,6 +582,7 @@ function setupTrimWaveform(previewUrl, onReady) {
     disableDragSel: null,
     volumeDb: 0, fadeInMs: 0, fadeInCurve: 'tri', fadeOutMs: 0, fadeOutCurve: 'tri',
     volumePoints: [], // [{timeMs, db}] — courbe d'automation (timeline waveform)
+    normalizeFeedback: '', // texte "Mesuré : X LUFS · Gain : Y dB" affiché après clic Normaliser
   }
 
   // Régions créées à la souris en mode montage (enableDragSelection) : adoptées comme
@@ -870,6 +874,7 @@ function wireEditorModeTabs() {
 // d'une région masquée de toute façon (display:none = hors du rendu ET du hit-test).
 function setEditorMode(mode) {
   if (!trimMarkers) return
+  const previousMode = trimMarkers.mode
   trimMarkers.mode = mode
   document.querySelectorAll('.mode-tab').forEach(el => el.classList.toggle('active', el.dataset.mode === mode))
 
@@ -899,7 +904,13 @@ function setEditorMode(mode) {
 
   // Mode volume : zoom verrouillé à ×1 — la courbe SVG est mappée sur la largeur visible,
   // elle n'est alignée avec la waveform qu'en vue non zoomée (pas de scroll horizontal).
-  if (mode === 'volume') applyZoom(1)
+  if (mode === 'volume') {
+    applyZoom(1)
+    ensureVolumeWaveformBase()
+    applyVolumeWaveformScale()
+  } else if (previousMode === 'volume') {
+    restoreOriginalWaveform()
+  }
   ;['btn-zoom-in', 'btn-zoom-out', 'btn-zoom-reset'].forEach(id => {
     const el = document.getElementById(id)
     if (el) el.disabled = (mode === 'volume')
@@ -959,9 +970,11 @@ function resetCurrentMode() {
     trimMarkers.volumeDb = 0; trimMarkers.fadeInMs = 0; trimMarkers.fadeOutMs = 0
     trimMarkers.fadeInCurve = 'tri'; trimMarkers.fadeOutCurve = 'tri'
     trimMarkers.volumePoints = []
+    trimMarkers.normalizeFeedback = ''
     renderVolumeCurve()
     updateVolumeOverlayVisibility()
     renderFadeOverlay()
+    applyVolumeWaveformScale()
     wavesurfer.setVolume(1)
   }
   renderModePanel()
@@ -1137,10 +1150,14 @@ function renderModePanel() {
       <button class="btn-ctrl" id="btn-vol-clear" ${nPoints ? '' : 'disabled'}>Effacer la courbe</button>
     </div>
     <div class="panel-row volume-row">
+      <button class="btn-ctrl" id="btn-normalize" title="Mesure la loudness intégrée (LUFS) et calcule le gain pour atteindre ${NORMALIZE_TARGET_LUFS} LUFS, plafonné pour ne jamais écrêter">
+        🎚️ Normaliser (${NORMALIZE_TARGET_LUFS} LUFS)
+      </button>
       <label class="panel-field">Volume
-        <input type="range" id="vol-slider" min="-12" max="12" step="0.5" value="${trimMarkers.volumeDb}">
+        <input type="range" id="vol-slider" min="-24" max="24" step="0.5" value="${trimMarkers.volumeDb}">
         <strong id="vol-value">${volLabel(trimMarkers.volumeDb)}</strong>
       </label>
+      <span class="panel-info" id="normalize-feedback">${trimMarkers.normalizeFeedback || ''}</span>
       <label class="panel-field">Fondu d'entrée
         <input type="number" id="fade-in-s" min="0" max="30" step="0.1" value="${(trimMarkers.fadeInMs / 1000).toFixed(1)}"> s
         <select id="fade-in-curve">${curveOptions(trimMarkers.fadeInCurve)}</select>
@@ -1157,6 +1174,34 @@ function renderModePanel() {
     // Aperçu à la lecture : le volume d'un élément média est plafonné à 1, seule une
     // baisse est donc réellement audible ici — le gain positif ne s'applique qu'au rendu.
     updatePreviewVolume(wavesurfer?.getCurrentTime() || 0)
+    applyVolumeWaveformScale()
+  }
+  const $normalize = document.getElementById('btn-normalize')
+  if ($normalize) $normalize.onclick = () => {
+    // volOriginalBuffer (PAS wavesurfer.getDecodedData()) : entrer en mode volume a déjà
+    // appelé applyVolumeWaveformScale()/forceWaveformRedraw(), qui REMPLACE le buffer
+    // interne de wavesurfer par l'enveloppe basse résolution du redessin (basePeaks) —
+    // getDecodedData() ne renverrait donc plus le vrai PCM à cet instant (même piège que
+    // le site, découvert en testant ce bouton : cf. getRealDecodedBuffer côté site).
+    const buf = volOriginalBuffer || wavesurfer?.getDecodedData()
+    if (!buf) return
+    const lufs = integratedLufs(buf)
+    const peak = peakDbfs(buf)
+    if (lufs === null) return // silence / trop court pour un bloc gated — rien à mesurer
+    const rawGain = NORMALIZE_TARGET_LUFS - lufs
+    const capGain = -1.0 - peak // jamais peak+gain > -1 dBFS
+    const capped = rawGain > capGain
+    const clamped = Math.max(-24, Math.min(24, capped ? capGain : rawGain))
+    trimMarkers.volumeDb = Math.round(clamped * 10) / 10
+    trimMarkers.normalizeFeedback =
+      `Mesuré : ${lufs.toFixed(1)} LUFS · Gain : ${trimMarkers.volumeDb >= 0 ? '+' : ''}${trimMarkers.volumeDb.toFixed(1)} dB` +
+      (capped ? ' (limité par la crête)' : '')
+    $vol.value = trimMarkers.volumeDb
+    document.getElementById('vol-value').textContent = volLabel(trimMarkers.volumeDb)
+    const $feedback = document.getElementById('normalize-feedback')
+    if ($feedback) $feedback.textContent = trimMarkers.normalizeFeedback
+    updatePreviewVolume(wavesurfer?.getCurrentTime() || 0)
+    applyVolumeWaveformScale()
   }
   const $volClear = document.getElementById('btn-vol-clear')
   if ($volClear) $volClear.onclick = () => {
@@ -1259,14 +1304,83 @@ function regionTag(text, color) {
 // remappés (toFinal) au moment de l'envoi comme les cue points. ⚠️ La courbe est mappée
 // sur la largeur visible : alignée uniquement à zoom ×1 → zoom verrouillé en mode volume.
 
+// Cible du bouton Normaliser — alignée sur radio.liq (normalize(target=-14.)) et le setting
+// site `audio.normalize_target_lufs`. Constante locale (pas d'accès aux settings du site
+// garanti avant appairage) — cf. PLAN-NORMALIZE-EDITEURS.md.
+const NORMALIZE_TARGET_LUFS = -14
+
 const VOL_DB_MAX = 12
 const VOL_DB_MIN = -60
 const VOL_DB_RANGE = VOL_DB_MAX - VOL_DB_MIN
 const VOL_GRIDLINES = [-48, -24, -12, 0, 6]
 
 let volOverlay = null // { host, svg, clearBtn } — recréé à chaque nouvelle piste
+// Bouton Normaliser (échelle réelle de la waveform en mode volume) : basePeaks = downsample
+// abs-max du buffer RÉELLEMENT décodé (échelle absolue, pas normalisée) ; originalBuffer
+// capturé une seule fois pour restaurer l'affichage historique (normalize:true) en sortant
+// du mode volume — cf. parité site (CuePointsEditor.vue), mêmes pièges wavesurfer.js 7.12.1.
+let volBasePeaks = null
+let volOriginalBuffer = null
 
 function volDbToLinear(db) { return Math.pow(10, db / 20) }
+
+// `wavesurfer.setOptions({peaks, duration})` reconstruit bien l'AudioBuffer interne
+// (Decoder.createBuffer) et déclenche renderer.setOptions() → reRender() — MAIS reRender()
+// redessine avec la copie interne `renderer.audioData`, jamais resynchronisée avec le
+// nouveau buffer par setOptions (limite de wavesurfer.js 7.12.1, vérifiée en lisant
+// vendor/wavesurfer.esm.js : seul render(audioData) met à jour audioData). Sans cet appel
+// explicite, setOptions ne change RIEN à l'écran — même piège que le site
+// (CuePointsEditor.vue), fix identique.
+function forceWaveformRedraw(peaks, normalize) {
+  if (!wavesurfer) return
+  wavesurfer.setOptions({ peaks, duration: wavesurfer.getDuration(), normalize })
+  const buf = wavesurfer.getDecodedData()
+  if (buf) wavesurfer.renderer.render(buf)
+}
+
+// Downsample abs-max à l'échelle ABSOLUE du buffer réellement décodé (~2× largeur
+// conteneur bins) — capturé une seule fois par piste/fichier (cf. reset dans
+// setupTrimWaveform). Les 2 éditeurs sont en normalize:true par défaut : sans ce mécanisme
+// de redessin à échelle réelle, un gain appliqué ne bougerait RIEN visuellement (wavesurfer
+// re-normaliserait toujours au pic à 100% de la hauteur).
+function ensureVolumeWaveformBase() {
+  if (volBasePeaks || !wavesurfer) return
+  const buf = wavesurfer.getDecodedData()
+  if (!buf) return
+  volOriginalBuffer = buf
+  const containerWidth = document.getElementById('waveform')?.clientWidth || 800
+  const targetBins = Math.max(200, containerWidth * 2)
+  const data = buf.getChannelData(0)
+  const samplesPerBin = Math.max(1, Math.floor(data.length / targetBins))
+  const bins = Math.ceil(data.length / samplesPerBin)
+  const peaks = new Float32Array(bins)
+  for (let b = 0; b < bins; b++) {
+    const start = b * samplesPerBin
+    const end = Math.min(data.length, start + samplesPerBin)
+    let max = 0
+    for (let i = start; i < end; i++) {
+      const a = Math.abs(data[i])
+      if (a > max) max = a
+    }
+    peaks[b] = max
+  }
+  volBasePeaks = peaks
+}
+
+function applyVolumeWaveformScale() {
+  if (!volBasePeaks || !wavesurfer) return
+  const gainLin = volDbToLinear(trimMarkers?.volumeDb || 0)
+  const scaled = new Array(volBasePeaks.length)
+  for (let i = 0; i < volBasePeaks.length; i++) scaled[i] = Math.min(1, volBasePeaks[i] * gainLin)
+  forceWaveformRedraw([scaled], false)
+}
+
+function restoreOriginalWaveform() {
+  if (!volOriginalBuffer) return
+  const channels = []
+  for (let c = 0; c < volOriginalBuffer.numberOfChannels; c++) channels.push(volOriginalBuffer.getChannelData(c))
+  forceWaveformRedraw(channels, true)
+}
 
 function volumeGainAt(tMs) {
   const pts = [...trimMarkers.volumePoints].sort((a, b) => a.timeMs - b.timeMs)
