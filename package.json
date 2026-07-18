@@ -1,6 +1,6 @@
 {
   "name": "radiostation-import-studio",
-  "version": "1.10.0",
+  "version": "1.11.0",
   "description": "RadioStation Import Studio — import CD vers RadioStation, application autonome",
   "author": "RadioStation",
   "scripts": {
