@@ -84,6 +84,38 @@ let filesEditingIndex = 0
 let filesFinishing = false
 let aubioModule = null // chargé paresseusement (une seule fois, coût wasm non négligeable)
 
+// ---- Type de contenu du lot en cours (flux "fichiers locaux" uniquement, pas le rip CD qui
+// reste titre musical exclusif) — un seul type par lot, même modèle que le select "Type" de
+// ManualUploadZone.vue côté site (cf. docs/PLAN-IMPORT-MULTITYPE.md du repo principal).
+let filesContentType = 'track' // 'track' | 'jingle' | 'spot' | 'promo'
+let filesCampaignId = ''
+let filesCategoryId = ''
+let adCampaignsCache = null
+let promoCampaignsCache = null
+let adCategoriesCache = null
+
+// Chargé une fois à l'entrée du mode fichiers (pas bloquant : les selects spot/promo restent
+// vides jusqu'à résolution, re-render déclenché ensuite). Pas de proxy générique côté main.js
+// (allowlist de 3 chemins explicites) — cf. commentaire proxyGetFromBackend.
+async function loadCampaignLists() {
+  try {
+    const [ads, promos, categories] = await Promise.all([
+      api('/campaigns/ads'),
+      api('/campaigns/promos'),
+      api('/categories/ads'),
+    ])
+    adCampaignsCache = ads
+    promoCampaignsCache = promos
+    adCategoriesCache = categories
+  } catch (e) {
+    console.warn('[loadCampaignLists]', e.message)
+    adCampaignsCache = adCampaignsCache || []
+    promoCampaignsCache = promoCampaignsCache || []
+    adCategoriesCache = adCategoriesCache || []
+  }
+  if (appMode === 'files' && filesStep === 'select') render()
+}
+
 // ---- HTTP ----
 async function api(path, opts = {}) {
   const res = await fetch(path, opts)
@@ -168,7 +200,11 @@ function enterFilesMode() {
   filesItems = []
   filesEditingIndex = 0
   filesFinishing = false
+  filesContentType = 'track'
+  filesCampaignId = ''
+  filesCategoryId = ''
   render()
+  if (adCampaignsCache === null) loadCampaignLists()
 }
 
 function backToModeSelector() {
@@ -2119,6 +2155,10 @@ function renderFiles() {
 }
 
 function renderFilesSelect() {
+  const needsCampaign = filesContentType === 'spot' || filesContentType === 'promo'
+  const campaignOptions = filesContentType === 'spot' ? (adCampaignsCache || []) : (promoCampaignsCache || [])
+  const dropzoneDisabled = needsCampaign && !filesCampaignId
+
   $app.innerHTML = `
     <div class="card">
       <div class="card-header">Importer des fichiers locaux</div>
@@ -2126,10 +2166,29 @@ function renderFilesSelect() {
         <p class="hint">Sélectionnez ou glissez-déposez un ou plusieurs fichiers audio (mp3,
         wav, flac, m4a…) — coupe du silence, cue points et analyse
         (BPM/tonalité/loudness/energy) se font ici, avant l'envoi vers RadioStation.</p>
-        <div id="files-dropzone" class="dropzone">
+        <div class="metadata-form">
+          <label>Type <select id="files-content-type">
+            <option value="track" ${filesContentType === 'track' ? 'selected' : ''}>Titre musical</option>
+            <option value="jingle" ${filesContentType === 'jingle' ? 'selected' : ''}>Jingle</option>
+            <option value="spot" ${filesContentType === 'spot' ? 'selected' : ''}>Spot publicitaire</option>
+            <option value="promo" ${filesContentType === 'promo' ? 'selected' : ''}>Promo</option>
+          </select></label>
+          ${needsCampaign ? `
+            <label>Campagne <select id="files-campaign">
+              <option value="">— Choisir —</option>
+              ${campaignOptions.map(c => `<option value="${c.id}" ${filesCampaignId === c.id ? 'selected' : ''}>${escapeHtml(c.name)}</option>`).join('')}
+            </select></label>` : ''}
+          ${filesContentType === 'spot' ? `
+            <label>Catégorie <select id="files-category">
+              <option value="">Aucune</option>
+              ${(adCategoriesCache || []).map(c => `<option value="${c.id}" ${filesCategoryId === c.id ? 'selected' : ''}>${escapeHtml(c.name)}</option>`).join('')}
+            </select></label>` : ''}
+        </div>
+        ${needsCampaign && !filesCampaignId ? '<p class="hint">Choisissez une campagne de destination avant d\'ajouter des fichiers.</p>' : ''}
+        <div id="files-dropzone" class="dropzone ${dropzoneDisabled ? 'dropzone-disabled' : ''}">
           <p>📁 Glissez-déposez vos fichiers ici<br>ou</p>
           <label class="btn" for="files-input">Parcourir…</label>
-          <input type="file" id="files-input" accept="audio/*" multiple hidden>
+          <input type="file" id="files-input" accept="audio/*" multiple hidden ${dropzoneDisabled ? 'disabled' : ''}>
         </div>
         <div id="files-upload-status"></div>
       </div>
@@ -2139,8 +2198,19 @@ function renderFilesSelect() {
     </div>`
   document.getElementById('btn-back-mode').onclick = backToModeSelector
   document.getElementById('files-input').onchange = (e) => uploadSelectedFiles(e.target.files)
+  document.getElementById('files-content-type').onchange = (e) => {
+    filesContentType = e.target.value
+    filesCampaignId = ''
+    filesCategoryId = ''
+    render()
+  }
+  const $campaignSelect = document.getElementById('files-campaign')
+  if ($campaignSelect) $campaignSelect.onchange = (e) => { filesCampaignId = e.target.value; render() }
+  const $categorySelect = document.getElementById('files-category')
+  if ($categorySelect) $categorySelect.onchange = (e) => { filesCategoryId = e.target.value }
 
   const $dropzone = document.getElementById('files-dropzone')
+  if (dropzoneDisabled) return
   let dragCounter = 0 // compte les enter/leave imbriqués (survol d'un enfant) sans faux "leave"
   $dropzone.addEventListener('dragenter', (e) => {
     e.preventDefault()
@@ -2165,6 +2235,12 @@ function renderFilesSelect() {
 async function uploadSelectedFiles(fileList) {
   const files = Array.from(fileList || [])
   if (!files.length) return
+  // Capturés au moment de l'upload (pas relus depuis les globales au moment de l'envoi) :
+  // le type/la campagne d'un lot ne doivent pas changer sous les pieds si l'utilisateur
+  // revient en arrière et modifie le sélecteur avant d'envoyer un lot précédent.
+  const contentType = filesContentType
+  const campaignId = filesCampaignId
+  const categoryId = filesCategoryId
   const $status = document.getElementById('files-upload-status')
   filesItems = []
   for (let i = 0; i < files.length; i++) {
@@ -2180,6 +2256,9 @@ async function uploadSelectedFiles(fileList) {
         artist: up.artist || '',
         album: '',
         year: '',
+        contentType,
+        campaignId,
+        categoryId,
         durationSeconds: up.duration_seconds,
         cueInSeconds: 0,
         introSeconds: 0,
@@ -2459,22 +2538,31 @@ function renderFilesSend() {
   // de réessayer. Les fichiers convertis/coupés ne sont plus supprimés côté serveur sur
   // cet échec (cf. main.js /files/finish), un nouveau POST /files/finish suffit.
   const needsFinishRetry = filesItems.some(it => !it.backendFileId)
-  const rows = filesItems.map((it, i) => `
+  const typeNameLabels = { track: 'Titre', jingle: 'Nom du jingle', spot: 'Nom du spot', promo: 'Nom de la promo' }
+  const rows = filesItems.map((it, i) => {
+    const type = it.contentType || 'track'
+    const isTrack = type === 'track'
+    const campaignList = type === 'spot' ? adCampaignsCache : type === 'promo' ? promoCampaignsCache : null
+    const campaignName = campaignList ? (campaignList.find(c => c.id === it.campaignId)?.name || '—') : null
+    return `
     <div class="card">
       <div class="card-header">${escapeHtml(it.title || it.name)}${it.sendStatus === 'done' ? ' ✅' : it.sendStatus === 'error' ? ' ⚠️' : ''}</div>
       <div class="card-body">
         ${it.sendStatus === 'error' ? `<div class="error-box">${escapeHtml(it.sendError)}</div>` : ''}
+        ${campaignName ? `<p class="hint">Campagne : ${escapeHtml(campaignName)}</p>` : ''}
         <div class="metadata-form">
-          <label>Titre <input type="text" data-idx="${i}" class="fmeta-title" value="${escapeHtml(it.title)}" ${it.sendStatus === 'done' ? 'disabled' : ''}></label>
+          <label>${typeNameLabels[type]} <input type="text" data-idx="${i}" class="fmeta-title" value="${escapeHtml(it.title)}" ${it.sendStatus === 'done' ? 'disabled' : ''}></label>
+          ${isTrack ? `
           <label>Artiste <input type="text" data-idx="${i}" class="fmeta-artist" value="${escapeHtml(it.artist)}" ${it.sendStatus === 'done' ? 'disabled' : ''}></label>
           <label>Album <input type="text" data-idx="${i}" class="fmeta-album" value="${escapeHtml(it.album)}" ${it.sendStatus === 'done' ? 'disabled' : ''}></label>
-          <label>Année <input type="text" data-idx="${i}" class="fmeta-year" value="${escapeHtml(String(it.year || ''))}" ${it.sendStatus === 'done' ? 'disabled' : ''}></label>
+          <label>Année <input type="text" data-idx="${i}" class="fmeta-year" value="${escapeHtml(String(it.year || ''))}" ${it.sendStatus === 'done' ? 'disabled' : ''}></label>` : ''}
         </div>
         <p class="hint">BPM : ${it.bpm ?? '—'} · Tonalité : ${it.key || '—'} · Loudness : ${it.loudnessLufs != null ? it.loudnessLufs + ' LUFS' : '—'}</p>
         ${it.sendStatus === 'done' ? '<div class="success-box">Envoyé vers RadioStation.</div>' :
           `<button class="btn btn-send-file" data-idx="${i}" ${(it.sendStatus === 'sending' || !it.backendFileId) ? 'disabled' : ''}>${it.sendStatus === 'sending' ? 'Envoi…' : 'Envoyer ce fichier'}</button>`}
       </div>
-    </div>`).join('')
+    </div>`
+  }).join('')
 
   $app.innerHTML = `
     ${rows}
@@ -2501,30 +2589,62 @@ function renderFilesSend() {
 async function sendFileItem(i) {
   const it = filesItems[i]
   if (!it.backendFileId) return
+  const type = it.contentType || 'track'
+  if ((type === 'spot' || type === 'promo') && !it.campaignId) {
+    it.sendStatus = 'error'
+    it.sendError = 'Aucune campagne de destination choisie'
+    render()
+    return
+  }
   it.sendStatus = 'sending'
   render()
   try {
-    await api('/import', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        file_id: it.backendFileId,
-        title: it.title,
-        artist_name: it.artist || 'Unknown',
-        album: it.album || undefined,
-        year: parseYear(it.year),
-        cue_in_seconds: it.cueInSeconds,
-        intro_seconds: it.introSeconds || undefined,
-        cue_out_seconds: it.cueOutSeconds,
-        ...overlayImportFields(it.overlay),
-        bpm: it.bpm ?? undefined,
-        key: it.key ?? undefined,
-        loudness_lufs: it.loudnessLufs ?? undefined,
-        energy: it.energy ?? undefined,
-        start_type: it.startType ?? undefined,
-        end_type: it.endType ?? undefined,
-      }),
-    })
+    if (type === 'jingle') {
+      await api('/import-jingle', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ file_id: it.backendFileId, name: it.title || it.name }),
+      })
+    } else if (type === 'spot') {
+      await api('/import-spot', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          file_id: it.backendFileId,
+          campaign_id: it.campaignId,
+          name: it.title || it.name,
+          category_id: it.categoryId || undefined,
+        }),
+      })
+    } else if (type === 'promo') {
+      await api('/import-promo', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ file_id: it.backendFileId, campaign_id: it.campaignId, name: it.title || it.name }),
+      })
+    } else {
+      await api('/import', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          file_id: it.backendFileId,
+          title: it.title,
+          artist_name: it.artist || 'Unknown',
+          album: it.album || undefined,
+          year: parseYear(it.year),
+          cue_in_seconds: it.cueInSeconds,
+          intro_seconds: it.introSeconds || undefined,
+          cue_out_seconds: it.cueOutSeconds,
+          ...overlayImportFields(it.overlay),
+          bpm: it.bpm ?? undefined,
+          key: it.key ?? undefined,
+          loudness_lufs: it.loudnessLufs ?? undefined,
+          energy: it.energy ?? undefined,
+          start_type: it.startType ?? undefined,
+          end_type: it.endType ?? undefined,
+        }),
+      })
+    }
     it.sendStatus = 'done'
   } catch (e) {
     it.sendStatus = 'error'

@@ -368,6 +368,11 @@ code {
   color: var(--text);
 }
 
+.dropzone-disabled {
+  opacity: 0.5;
+  pointer-events: none;
+}
+
 #files-upload-status {
   color: var(--text-dim);
   font-size: 0.9rem;

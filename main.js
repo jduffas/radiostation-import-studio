@@ -1075,10 +1075,12 @@ function uploadToBackend(backendUrl, authToken, files, metaArr) {
 // backend dont CORS_ORIGINS est configuré de façon restrictive (observé en prod : liste
 // explicite localhost:3000/5173, ne contient pas notre origine locale). Même pattern que
 // uploadToBackend, en JSON plutôt qu'en multipart.
-function proxyImportToBackend(backendUrl, authToken, payload) {
+// backendPath paramétrable (au lieu du littéral figé /api/importer/import) : réutilisé pour
+// les 4 types d'import (titre/jingle/spot/promo, cf. PLAN-IMPORT-MULTITYPE.md du repo principal).
+function proxyImportToBackend(backendUrl, authToken, payload, backendPath = '/api/importer/import') {
   const body = JSON.stringify(payload);
   return new Promise((resolve, reject) => {
-    const u = new URL('/api/importer/import', backendUrl);
+    const u = new URL(backendPath, backendUrl);
     const port = u.port ? parseInt(u.port, 10) : (u.protocol === 'https:' ? 443 : 80);
     const opts = {
       method: 'POST',
@@ -1107,6 +1109,42 @@ function proxyImportToBackend(backendUrl, authToken, payload) {
     });
     req.on('error', reject);
     req.write(body);
+    req.end();
+  });
+}
+
+// Proxy GET serveur-à-serveur (mêmes raisons anti-CORS que proxyImportToBackend) — utilisé
+// pour peupler les selects campagne/catégorie du flux spot/promo dans local-ui. Allowlist de
+// chemins backend explicite dans les routes appelantes (pas de proxy générique par chemin
+// arbitraire, pour ne pas réintroduire la faille CORS déjà corrigée : cf. isAllowedOrigin).
+function proxyGetFromBackend(backendUrl, authToken, backendPath) {
+  return new Promise((resolve, reject) => {
+    const u = new URL(backendPath, backendUrl);
+    const port = u.port ? parseInt(u.port, 10) : (u.protocol === 'https:' ? 443 : 80);
+    const opts = {
+      method: 'GET',
+      hostname: u.hostname,
+      port,
+      path: u.pathname + u.search,
+      headers: {
+        ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+      },
+    };
+    const mod = u.protocol === 'https:' ? https : http;
+    const req = mod.request(opts, res => {
+      let d = '';
+      res.on('data', c => { d += c; });
+      res.on('end', () => {
+        try {
+          const parsed = JSON.parse(d);
+          if (res.statusCode >= 200 && res.statusCode < 300) resolve(parsed);
+          else reject(new Error(parsed.detail || `HTTP ${res.statusCode}`));
+        } catch {
+          reject(new Error(`HTTP ${res.statusCode}: ${d.slice(0, 200)}`));
+        }
+      });
+    });
+    req.on('error', reject);
     req.end();
   });
 }
@@ -2415,6 +2453,7 @@ const server = http.createServer(async (req, res) => {
 
   // ── Finalisation d'un import (page locale, Phase 2b « interface embarquée ») ─
   // Proxy serveur-à-serveur vers le vrai backend — cf. proxyImportToBackend (évite CORS).
+  // Titre musical (comportement historique, chemin backend par défaut).
   if (req.method === 'POST' && pathname === '/import') {
     const settings = loadSettings();
     if (!settings.server_url || !settings.device_token) {
@@ -2432,6 +2471,57 @@ const server = http.createServer(async (req, res) => {
         jsonResp(res, 502, { error: e.message });
       }
     });
+    return;
+  }
+
+  // ── Jingle/spot/promo (Phase « import multi-type ») — même proxy que /import, chemin
+  // backend différent selon le type choisi dans local-ui (sélecteur du flux "fichiers
+  // locaux" uniquement, pas le flux CD qui reste titre musical exclusivement).
+  const MULTI_TYPE_IMPORT_ROUTES = {
+    '/import-jingle': '/api/importer/import-jingle',
+    '/import-spot': '/api/importer/import-spot',
+    '/import-promo': '/api/importer/import-promo',
+  };
+  if (req.method === 'POST' && MULTI_TYPE_IMPORT_ROUTES[pathname]) {
+    const settings = loadSettings();
+    if (!settings.server_url || !settings.device_token) {
+      return jsonResp(res, 401, { error: "Application non appairée — connectez-la d'abord depuis le site." });
+    }
+    let body = '';
+    req.on('data', c => { body += c; });
+    req.on('end', async () => {
+      let payload = {};
+      try { payload = JSON.parse(body); } catch { /* ignore */ }
+      try {
+        const result = await proxyImportToBackend(
+          settings.server_url, settings.device_token, payload, MULTI_TYPE_IMPORT_ROUTES[pathname],
+        );
+        jsonResp(res, 200, result);
+      } catch (e) {
+        jsonResp(res, 502, { error: e.message });
+      }
+    });
+    return;
+  }
+
+  // ── Listes campagnes/catégories (pour les selects destination spot/promo) — proxy GET,
+  // allowlist explicite de 3 chemins backend, pas de proxy générique (cf. proxyGetFromBackend).
+  const CAMPAIGN_LIST_ROUTES = {
+    '/campaigns/ads': '/api/ads/campaigns',
+    '/campaigns/promos': '/api/promos/campaigns',
+    '/categories/ads': '/api/ads/categories',
+  };
+  if (req.method === 'GET' && CAMPAIGN_LIST_ROUTES[pathname]) {
+    const settings = loadSettings();
+    if (!settings.server_url || !settings.device_token) {
+      return jsonResp(res, 401, { error: "Application non appairée — connectez-la d'abord depuis le site." });
+    }
+    try {
+      const result = await proxyGetFromBackend(settings.server_url, settings.device_token, CAMPAIGN_LIST_ROUTES[pathname]);
+      jsonResp(res, 200, result);
+    } catch (e) {
+      jsonResp(res, 502, { error: e.message });
+    }
     return;
   }
 
