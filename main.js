@@ -1559,6 +1559,17 @@ function detectLoudnessLufs(filePath) {
 const AUTO_NORMALIZE_TARGET_LUFS = -14;
 const AUTO_NORMALIZE_SKIP_THRESHOLD_DB = 0.5;
 
+// Retourne la loudness_lufs RÉELLE du fichier tel qu'il est stocké après cet appel — que le
+// gain ait été appliqué ou skippé (déjà proche de la cible). Port fidèle de
+// audio_normalize.py::normalize_on_import_and_measure (backend) qui remesure TOUJOURS après
+// coup, jamais None juste parce que le skip s'est déclenché — null ici signifie
+// spécifiquement "aucune mesure disponible" (échec ffmpeg), pas "rien à faire".
+// ⚠️ Avant ce fix (signalé par l'utilisateur, écart +0,8 dB constaté), le skip renvoyait
+// null : `/files/upload`/doRip ne renseignaient alors PAS `loudness_lufs`, privant
+// `editorContext.initialLoudnessLufs` (local-ui/app.js) de toute mesure serveur — le bouton
+// Normaliser de l'outil Volume retombait sur la seule remesure client (BS.1770 JS, ±0.5-0.8
+// LU d'écart documenté vs ffmpeg ebur128) et rouvrait un gain résiduel sur un fichier déjà
+// correct, y compris quand le "déjà correct" venait du skip lui-même.
 async function performAutoNormalize(filePath) {
   try {
     const [lufs, stats] = await Promise.all([detectLoudnessLufs(filePath), getVolumeStats(filePath)]);
@@ -1567,7 +1578,7 @@ async function performAutoNormalize(filePath) {
     const capGain = stats?.max != null ? (-1.0 - stats.max) : rawGain;
     let gain = Math.min(rawGain, capGain);
     gain = Math.max(-24, Math.min(24, gain));
-    if (Math.abs(gain) < AUTO_NORMALIZE_SKIP_THRESHOLD_DB) return null;
+    if (Math.abs(gain) < AUTO_NORMALIZE_SKIP_THRESHOLD_DB) return lufs;
     await applyAudioEdit(filePath, { volume_db: gain });
     return await detectLoudnessLufs(filePath);
   } catch (e) {
@@ -2070,8 +2081,9 @@ const server = http.createServer(async (req, res) => {
         duration_seconds: durationSeconds,
         title: guessed.title,
         artist: guessed.artist,
-        // Mesure post-gain de la normalisation auto (null si désactivée, échec de mesure,
-        // ou gain sous le seuil de skip — pré-remplit l'affichage "Mesuré" côté client.
+        // Mesure réelle du fichier tel qu'il est stocké après normalisation auto (gain
+        // appliqué OU skippé si déjà proche de la cible) — null seulement si désactivée ou
+        // échec de mesure. Pré-remplit l'affichage "Mesuré" côté client.
         loudness_lufs: loudnessLufs,
       });
     } catch (e) {

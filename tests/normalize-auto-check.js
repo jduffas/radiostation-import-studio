@@ -138,6 +138,41 @@ async function waitUp(url, ms = 8000) {
     sigBefore !== null && sigAfter !== null && sigBefore === sigAfter,
     `avant=${sigBefore} après=${sigAfter}`);
 
+  // ---- Régression : fichier DÉJÀ à -14 LUFS AVANT même l'upload (pas besoin de gain à
+  // l'import, performAutoNormalize skip < 0.5 dB côté serveur local) — signalé par
+  // l'utilisateur : /files/upload renvoyait loudness_lufs=null dans CE cas précis (skip
+  // confondu avec "pas mesuré"), privant editorContext.initialLoudnessLufs de toute mesure
+  // serveur ; le clic Normaliser retombait alors sur la seule remesure client (BS.1770 JS)
+  // et rouvrait un gain résiduel (+0.8 dB observé en prod) sur un fichier déjà correct. ----
+  await page.goto(BASE, { waitUntil: 'networkidle' });
+  await page.waitForSelector('#btn-mode-files', { timeout: 5000 });
+  await page.click('#btn-mode-files');
+  await page.waitForSelector('#files-input', { timeout: 5000, state: 'attached' });
+  const skipFixture = path.join(SCRATCH, '.tmp', 'fixtures', 'already-normalized.wav');
+  if (!fs.existsSync(skipFixture)) { console.error('fixture manquante, lancer generate-fixtures.sh'); process.exit(2); }
+  const [uploadResp2] = await Promise.all([
+    page.waitForResponse(r => r.url().includes('/files/upload') && r.status() === 200),
+    page.setInputFiles('#files-input', skipFixture),
+  ]);
+  const uploadBody2 = await uploadResp2.json();
+  console.log(`  (info) réponse /files/upload (fixture déjà à la cible) loudness_lufs : ${uploadBody2.loudness_lufs}`);
+  check('upload (skip < 0.5dB) : loudness_lufs mesuré quand même, PAS null',
+    uploadBody2.loudness_lufs != null && Math.abs(uploadBody2.loudness_lufs - (-14)) <= 1.0,
+    JSON.stringify(uploadBody2.loudness_lufs));
+
+  await page.waitForSelector('#btn-confirm-file', { timeout: 15000 });
+  await page.waitForFunction(() => document.getElementById('sum-kept')?.textContent.startsWith('00:10'), { timeout: 20000 });
+  await page.click('.mode-tab[data-mode="volume"]');
+  await sleep(300);
+  const feedbackSkip = await page.textContent('#normalize-feedback').catch(() => null);
+  check('upload (skip < 0.5dB) : "Mesuré" affiché dès l\'entrée dans l\'outil (mesure serveur dispo)',
+    !!feedbackSkip && feedbackSkip.includes('Mesuré'), feedbackSkip);
+  await page.click('#btn-normalize');
+  await sleep(300);
+  const volValueSkip = await page.textContent('#vol-value').catch(() => null);
+  check('upload (skip < 0.5dB) : clic Normaliser laisse le gain à 0.0 (fichier déjà correct)',
+    volValueSkip === '0.0 dB', volValueSkip);
+
   check('aucune erreur JS pendant la session', pageErrors.length === 0, pageErrors.join('\n'));
 
   await browser.close();
