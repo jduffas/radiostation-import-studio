@@ -57,6 +57,9 @@ function parseCueOut(txt) {
   await page.click('#btn-mode-files');
   await page.setInputFiles('#files-input', path.join(SCRATCH, '.tmp', 'fixtures', 'Artist One - Nice Song.wav'));
   await page.waitForFunction(() => document.getElementById('sum-kept')?.textContent.startsWith('00:10'), { timeout: 20000 });
+  // Mode par défaut = 'cut' (Montage) depuis le 19 juil 2026 — trim-keep/cue-out
+  // n'existent (display) qu'en mode 'cue', il faut y basculer avant de les mesurer.
+  await page.click('.mode-tab[data-mode="cue"]');
 
   const keepSel = '#waveform [part~="trim-keep"]';
   // Étiquette "TRANSITION" (region-content du marqueur cue-out) : la poignée de drag réelle,

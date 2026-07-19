@@ -35,6 +35,20 @@ http.createServer(async (req, res) => {
     return send(200, { ok: true });
   }
 
+  // Listes campagnes/catégories (sélecteurs spot/promo du flux fichiers, feature import
+  // multi-type) — le stub ne les connaissait pas (404 → proxy main.js renvoyait 502,
+  // logué par Chrome en erreur console et faisant échouer tous les checks "sans erreur JS"
+  // en aval, signalé 19 juil 2026). Fixtures minimales : seuls id/name sont lus côté UI.
+  if (req.method === 'GET' && req.url === '/api/ads/campaigns') {
+    return send(200, [{ id: 'stub-ad-campaign-1', name: 'Campagne pub stub' }]);
+  }
+  if (req.method === 'GET' && req.url === '/api/promos/campaigns') {
+    return send(200, [{ id: 'stub-promo-campaign-1', name: 'Campagne promo stub' }]);
+  }
+  if (req.method === 'GET' && req.url === '/api/ads/categories') {
+    return send(200, [{ id: 'stub-ad-category-1', name: 'Catégorie pub stub' }]);
+  }
+
   const body = await readBody(req);
 
   if (req.url === '/api/importer/upload-with-metadata') {
