@@ -112,6 +112,10 @@ async function waitUp(url, ms = 8000) {
   console.log(`      (info) BPM=${bpm} Tonalité=${key} sur sinus 440Hz`);
 
   // Détection auto des cue points (silences) — sur un sinus continu : pas de crash attendu
+  // Mode par défaut à l'ouverture = 'cut' (Montage, ordre logique d'utilisation) depuis le
+  // 19 juil 2026 — #btn-auto-cue appartient au panneau du mode 'cue', il faut y basculer.
+  await page.click('.mode-tab[data-mode="cue"]');
+  await page.waitForSelector('#btn-auto-cue', { timeout: 5000 });
   await page.click('#btn-auto-cue');
   await sleep(1500);
   check('UI fichiers: bouton détection auto sans erreur JS', pageErrors.length === 0, pageErrors.join(' ; '));
@@ -355,6 +359,10 @@ async function waitUp(url, ms = 8000) {
     const b = document.getElementById('sum-bpm')?.textContent;
     return b && b !== '…';
   }, { timeout: 30000 });
+  // Mode par défaut = 'cut' (Montage) depuis le 19 juil 2026 — #inp-cuein appartient au
+  // panneau du mode 'cue', il faut y basculer avant de le remplir.
+  await page.click('.mode-tab[data-mode="cue"]');
+  await page.waitForSelector('#inp-cuein', { timeout: 5000 });
   await page.fill('#inp-cuein', '1.5');
   await page.dispatchEvent('#inp-cuein', 'change');
   await page.click('#btn-confirm-file');

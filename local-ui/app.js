@@ -604,7 +604,9 @@ function setupTrimWaveform(previewUrl, onReady) {
     introPos: 0, introRegion: null,
     keepRegion: null, cueInRegion: null, cueOutRegion: null, updating: false,
     // Éditeur unifié (v1.7) : mode courant + zone jingle intérieur + montage + volume/fondus
-    mode: 'cue', // 'cue' | 'jingle' | 'cut' | 'volume'
+    // Ordre logique d'utilisation : montage → volume/fondus → cue points → jingle intérieur
+    // (l'analyse vocale se fait en dernier, une fois le fichier final déjà défini).
+    mode: 'cut', // 'cut' | 'volume' | 'cue' | 'jingle'
     regionsPlugin: regions,
     overlayStart: null, overlayEnd: null, overlayRegion: null,
     overlayTouched: false, // true dès que l'utilisateur a déplacé/posé/retiré la zone lui-même
@@ -717,7 +719,7 @@ function setupTrimWaveform(previewUrl, onReady) {
         trimMarkers.introRegion = regions.addRegion({ id: 'intro-end', start: 0, color: 'rgba(255,152,0,0.9)', drag: true, resize: false, content: markerLabel('INTRO', '#ff9800', 26) })
         trimMarkers.cueOutRegion = regions.addRegion({ id: 'cue-out', start: dur, color: 'rgba(244,67,54,0.9)', drag: true, resize: false, content: markerLabel('TRANSITION', '#f44336') })
         // Applique l'interactivité du mode courant (les régions viennent seulement d'exister) —
-        // en mode 'cue' par défaut, comportement identique à avant l'éditeur unifié.
+        // en mode 'cut' par défaut (ordre logique d'utilisation, cf. trimMarkers.mode).
         ensureVolumeOverlay()
         updateVolumeOverlayVisibility()
         ensureFadeOverlay()
@@ -889,10 +891,10 @@ function syncNumInput(id, valueSeconds) {
 function editorModeTabsHtml() {
   return `
     <div class="mode-tabs" id="mode-tabs">
-      <button class="mode-tab active" data-mode="cue">🎯 Cue points</button>
-      <button class="mode-tab" data-mode="jingle">📢 Jingle intérieur</button>
-      <button class="mode-tab" data-mode="cut">✂️ Montage</button>
+      <button class="mode-tab active" data-mode="cut">✂️ Montage</button>
       <button class="mode-tab" data-mode="volume">🔊 Volume &amp; fondus</button>
+      <button class="mode-tab" data-mode="cue">🎯 Cue points</button>
+      <button class="mode-tab" data-mode="jingle">📢 Jingle intérieur</button>
     </div>`
 }
 
@@ -1777,7 +1779,10 @@ async function ensureVocalZones() {
   renderModePanel()
 }
 
-function bestVocalZone(zones, durationSeconds) {
+// cuts = coupes déjà posées ({start, end} en secondes, cf. sortedCuts()) : une zone amputée
+// par une coupe pendant que l'analyse tournait ne doit pas battre une zone intacte moins
+// bien notée à l'origine, ni être proposée tronquée si presque tout son contenu a disparu.
+function bestVocalZone(zones, durationSeconds, cuts = []) {
   // Critère de centralité sur le MILIEU de la zone (pas ses bornes) : une longue zone
   // légitime — ex. solo final — peut s'étendre près de la fin sans être écartée
   // (l'analyse borne déjà les zones à 5s des bords de la piste).
@@ -1787,15 +1792,35 @@ function bestVocalZone(zones, durationSeconds) {
     return mid > durMs * 0.10 && mid < durMs * 0.90
   })
   const pool = central.length ? central : zones
-  // Meilleure zone = score de qualité (durée × clarté × calme) si présent, sinon durée
-  const rank = z => (z?.score ?? z?.duration_ms) || 0
-  return pool.reduce((best, z) => (rank(z) > rank(best) ? z : best), null)
+
+  // Durée réellement exploitable après les coupes déjà posées — même calcul qu'à l'export
+  // (toFinal/zoneToFinal dans collectEditPayload) : on retire le chevauchement de chaque
+  // coupe plutôt que de se fier à la durée brute de la zone détectée.
+  const keptMs = (z) => {
+    const zStart = z.start_ms || 0, zEnd = z.end_ms || 0
+    let overlap = 0
+    for (const c of cuts) overlap += Math.max(0, Math.min(zEnd, c.end * 1000) - Math.max(zStart, c.start * 1000))
+    return Math.max(0, (zEnd - zStart) - overlap)
+  }
+  // Seuil identique à zoneToFinal (e - s >= 1s) : une zone quasi entièrement coupée est
+  // écartée plutôt que proposée amputée.
+  const usable = pool.filter(z => keptMs(z) >= 1000)
+  if (!usable.length) return null
+
+  // Score original (durée × clarté × calme) dégradé au prorata de ce qu'il en reste après
+  // coupes ; sans score, on classe directement sur la durée exploitable.
+  const rank = (z) => {
+    const kept = keptMs(z)
+    const full = Math.max(1, (z.end_ms || 0) - (z.start_ms || 0))
+    return z.score != null ? z.score * (kept / full) : kept
+  }
+  return usable.reduce((best, z) => (rank(z) > rank(best) ? z : best), usable[0])
 }
 
 function applyBestVocalZone(markTouched) {
   if (!trimMarkers || !wavesurfer) return
   const zones = trimMarkers.vocalZones || []
-  const best = bestVocalZone(zones, wavesurfer.getDuration())
+  const best = bestVocalZone(zones, wavesurfer.getDuration(), sortedCuts())
   if (!best) return
   setOverlayZone(best.start_ms / 1000, best.end_ms / 1000)
   if (markTouched) trimMarkers.overlayTouched = true
@@ -1952,7 +1977,7 @@ function collectEditPayload() {
   } else if (trimMarkers.overlayTouched) {
     overlay = { enabled: false }
   } else if (hasEdit && Array.isArray(trimMarkers.vocalZones) && trimMarkers.vocalZones.length) {
-    const best = bestVocalZone(trimMarkers.vocalZones, dur)
+    const best = bestVocalZone(trimMarkers.vocalZones, dur, cuts)
     const z = best ? zoneToFinal(best.start_ms / 1000, best.end_ms / 1000) : null
     if (z) overlay = { enabled: true, ...z }
   }
