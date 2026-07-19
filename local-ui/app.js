@@ -1272,14 +1272,26 @@ function renderModePanel() {
     const capGain = -1.0 - peak // jamais peak+gain > -1 dBFS
     const capped = rawGain > capGain
     const clamped = Math.max(-24, Math.min(24, capped ? capGain : rawGain))
-    // Sous ce seuil, pas de gain appliqué — même valeur que le skip d'idempotence du
-    // service de normalisation auto (main.js::performAutoNormalize / audio_normalize.py
-    // côté backend) : un fichier déjà normalisé ne doit pas voir sa courbe bouger pour une
-    // correction négligeable (résidu d'écart entre les 2 mesures LUFS indépendantes).
-    trimMarkers.volumeDb = Math.abs(clamped) < NORMALIZE_SKIP_THRESHOLD_DB ? 0 : Math.round(clamped * 10) / 10
+    // Si le backend a déjà mesuré ce fichier (import, ffmpeg ebur128 — LE MÊME moteur que
+    // le rendu final) et l'estime déjà à la cible, on fait confiance à CETTE mesure plutôt
+    // qu'à la remesure client (BS.1770 JS) : signalé 19 juil 2026, un écart réel de 0.7 dB
+    // entre les 2 moteurs (au-dessus du seuil de skip 0.5 dB, cf. mémoire
+    // normalize_editors_lufs_feature "Bug 3" — déjà observé à 0.7 LU sur bruit rose en test,
+    // maintenant confirmé sur un titre réel) réappliquait un gain sur un fichier déjà
+    // correct. La mesure serveur, faite au moment du rendu réel, est plus fiable que la
+    // remesure client pour DÉCIDER du skip — reste utilisée seulement en dernier recours si
+    // aucune mesure serveur n'est connue pour ce titre.
+    const backendAlreadyOk = editorContext?.initialLoudnessLufs != null
+      && Math.abs(editorContext.initialLoudnessLufs - NORMALIZE_TARGET_LUFS) < NORMALIZE_SKIP_THRESHOLD_DB
+    const skip = backendAlreadyOk || Math.abs(clamped) < NORMALIZE_SKIP_THRESHOLD_DB
+    trimMarkers.volumeDb = skip ? 0 : Math.round(clamped * 10) / 10
+    // Affiche la mesure serveur (fiable) plutôt que la remesure client quand elle a motivé
+    // le skip — sinon "Mesuré : -14.7 LUFS · Gain : +0.0 dB" reste confus (pourquoi 0 gain
+    // sur -14.7 ?) alors que le fichier réel est bien à -14.0 LUFS.
+    const displayedLufs = backendAlreadyOk ? editorContext.initialLoudnessLufs : lufs
     trimMarkers.normalizeFeedback =
-      `Mesuré : ${lufs.toFixed(1)} LUFS · Gain : ${trimMarkers.volumeDb >= 0 ? '+' : ''}${trimMarkers.volumeDb.toFixed(1)} dB` +
-      (capped ? ' (limité par la crête)' : '')
+      `Mesuré : ${displayedLufs.toFixed(1)} LUFS · Gain : ${trimMarkers.volumeDb >= 0 ? '+' : ''}${trimMarkers.volumeDb.toFixed(1)} dB` +
+      (capped && !skip ? ' (limité par la crête)' : '')
     $vol.value = trimMarkers.volumeDb
     document.getElementById('vol-value').textContent = volLabel(trimMarkers.volumeDb)
     const $feedback = document.getElementById('normalize-feedback')

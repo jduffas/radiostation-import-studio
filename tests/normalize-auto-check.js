@@ -123,6 +123,15 @@ async function waitUp(url, ms = 8000) {
   console.log(`  (info) feedback après clic : ${feedbackAfterClick}`);
   const volValueAfter = await page.textContent('#vol-value').catch(() => null);
   check('Fix B : gain reste à 0.0 après clic (déjà à la cible, skip < 0.5 dB)', volValueAfter === '0.0 dB', volValueAfter);
+  // Fix C (19 juil 2026) : un écart réel de mesure entre le moteur serveur (ffmpeg ebur128,
+  // celui qui a VRAIMENT normalisé ce fichier à l'import) et la remesure client (BS.1770 JS)
+  // peut dépasser le seuil de skip de 0.5 dB sur un signal complexe (0.7 dB observé en
+  // production) — le clic sur Normaliser réappliquait alors un gain sur un fichier pourtant
+  // déjà correct. Le texte affiché doit désormais reprendre la mesure SERVEUR (autorité,
+  // celle qui a produit le fichier réel), pas la remesure client, quand elle motive le skip.
+  check('Fix C : "Mesuré" après clic reprend la mesure serveur (autorité), pas une remesure client divergente',
+    feedbackAfterClick != null && feedbackAfterClick.includes(uploadBody.loudness_lufs.toFixed(1)),
+    `attendu ${uploadBody.loudness_lufs.toFixed(1)} dans "${feedbackAfterClick}"`);
 
   const sigAfter = await waveformSignature();
   check('Fix B : waveform PAS redessinée (aucune modification de la courbe)',
