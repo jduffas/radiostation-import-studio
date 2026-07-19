@@ -500,12 +500,7 @@ function renderTrimming() {
           <button class="btn-ctrl" id="btn-stop">Stop</button>
           <button class="btn-ctrl" id="btn-reset">Tout réinitialiser</button>
         </div>
-        <div class="zoom-group">
-          <button class="btn-ctrl" id="btn-zoom-out" title="Zoom arrière">➖</button>
-          <span class="zoom-level" id="zoom-level">×1</span>
-          <button class="btn-ctrl" id="btn-zoom-in" title="Zoom avant (précision des cue points)">➕</button>
-          <button class="btn-ctrl" id="btn-zoom-reset" title="Ajuster à la fenêtre">Ajuster</button>
-        </div>
+        <div class="zoom-group">${zoomControlsHtml()}</div>
         <div class="time-display" id="time-display">00:00.000 / 00:00.000</div>
       </div>
       <div class="summary-row">
@@ -575,6 +570,13 @@ const FADE_CURVES = [
 let waveZoom = { level: 1, fitPxPerSec: 0 }
 const ZOOM_MIN = 1
 const ZOOM_MAX = 40
+// Slider linéaire 0..ZOOM_SLIDER_MAX <-> niveau de zoom exponentiel ZOOM_MIN..ZOOM_MAX —
+// une correspondance linéaire donnerait un slider qui ne bouge presque plus en fin de
+// course (×20→×40 tiendrait sur la même plage que ×1→×2). Même mapping utilisé par la
+// molette (Ctrl+molette / pincement trackpad, cf. setupTrimWaveform).
+const ZOOM_SLIDER_MAX = 1000
+function zoomLevelFromSlider(v) { return ZOOM_MIN * Math.pow(ZOOM_MAX / ZOOM_MIN, v / ZOOM_SLIDER_MAX) }
+function sliderFromZoomLevel(level) { return ZOOM_SLIDER_MAX * Math.log(level / ZOOM_MIN) / Math.log(ZOOM_MAX / ZOOM_MIN) }
 
 function applyZoom(level) {
   waveZoom.level = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, level))
@@ -583,6 +585,12 @@ function applyZoom(level) {
   }
   const $zoomLevel = document.getElementById('zoom-level')
   if ($zoomLevel) $zoomLevel.textContent = `×${waveZoom.level % 1 === 0 ? waveZoom.level : waveZoom.level.toFixed(1)}`
+  // Ne pas écraser la position pendant que l'utilisateur la glisse (même pattern que
+  // syncFadeInputs) — sinon un pas de mise à jour concurrent (ex. molette) fait sauter le curseur.
+  const $slider = document.getElementById('zoom-slider')
+  if ($slider && document.activeElement !== $slider) {
+    $slider.value = String(Math.round(sliderFromZoomLevel(waveZoom.level)))
+  }
 }
 
 // Généralisé (Phase 4) pour servir aussi bien la préecoute CD (/rip-preview/:n) que celle
@@ -655,9 +663,20 @@ function setupTrimWaveform(previewUrl, onReady) {
   // l'attache — safe même si l'instance n'existe pas encore (chargement blob ci-dessous).
   document.getElementById('btn-playpause').onclick = () => wavesurfer?.playPause()
   document.getElementById('btn-stop').onclick = () => wavesurfer?.stop()
-  document.getElementById('btn-zoom-in').onclick = () => applyZoom(waveZoom.level * 2)
-  document.getElementById('btn-zoom-out').onclick = () => applyZoom(waveZoom.level / 2)
+  document.getElementById('zoom-slider').oninput = (e) => applyZoom(zoomLevelFromSlider(Number(e.target.value)))
   document.getElementById('btn-zoom-reset').onclick = () => applyZoom(1)
+  // Ctrl+molette (souris) ou pincement trackpad = zoom continu centré sur le même code que
+  // le slider (waveZoom.level). Molette seule (2 doigts, sans Ctrl) = scroll horizontal
+  // natif du conteneur wavesurfer, laissé passer (pas de preventDefault). ⚠️ Chromium/
+  // WebView2 (Windows) synthétisent bien un wheel ctrlKey=true pour un pincement trackpad —
+  // WKWebView (macOS)/WebKitGTK (Linux) utilisés par les builds natifs de ce repo ne sont
+  // PAS vérifiés sur ce point (pas de Mac/trackpad Linux sous la main) : à valider sur l'app
+  // réelle, cf. mémoire cd_ripper_unified_editor.
+  document.getElementById('waveform').addEventListener('wheel', (e) => {
+    if (!e.ctrlKey || trimMarkers?.mode === 'volume') return
+    e.preventDefault()
+    applyZoom(waveZoom.level * Math.exp(-e.deltaY * 0.01))
+  }, { passive: false })
   document.getElementById('btn-preview-start').onclick = () => {
     if (!wavesurfer) return
     wavesurfer.setTime(trimMarkers.cueInPos)
@@ -886,6 +905,17 @@ function syncNumInput(id, valueSeconds) {
   if (el && document.activeElement !== el) el.value = valueSeconds.toFixed(2)
 }
 
+// Slider (glissé continu) + Ctrl+molette/pincement trackpad sur la waveform (setupTrimWaveform)
+// remplacent les boutons ➕/➖ (signalé peu intuitif, 19 juil 2026) — factorisé ici, utilisé
+// par les 2 écrans d'édition (CD et fichiers, markup identique auparavant dupliqué).
+function zoomControlsHtml() {
+  return `
+    <input type="range" id="zoom-slider" class="zoom-slider" min="0" max="${ZOOM_SLIDER_MAX}" value="0"
+      title="Zoom — glisser, ou Ctrl+molette/pincement sur la waveform">
+    <span class="zoom-level" id="zoom-level">×1</span>
+    <button class="btn-ctrl" id="btn-zoom-reset" title="Ajuster à la fenêtre">Ajuster</button>`
+}
+
 // ══ Éditeur unifié (v1.7) : modes, zone jingle intérieur, montage, volume & fondus ══════
 
 function editorModeTabsHtml() {
@@ -953,7 +983,7 @@ function setEditorMode(mode) {
   } else if (previousMode === 'volume') {
     restoreOriginalWaveform()
   }
-  ;['btn-zoom-in', 'btn-zoom-out', 'btn-zoom-reset'].forEach(id => {
+  ;['zoom-slider', 'btn-zoom-reset'].forEach(id => {
     const el = document.getElementById(id)
     if (el) el.disabled = (mode === 'volume')
   })
@@ -2312,12 +2342,7 @@ function renderFilesTrimming() {
           <button class="btn-ctrl" id="btn-stop">Stop</button>
           <button class="btn-ctrl" id="btn-reset">Tout réinitialiser</button>
         </div>
-        <div class="zoom-group">
-          <button class="btn-ctrl" id="btn-zoom-out" title="Zoom arrière">➖</button>
-          <span class="zoom-level" id="zoom-level">×1</span>
-          <button class="btn-ctrl" id="btn-zoom-in" title="Zoom avant (précision des cue points)">➕</button>
-          <button class="btn-ctrl" id="btn-zoom-reset" title="Ajuster à la fenêtre">Ajuster</button>
-        </div>
+        <div class="zoom-group">${zoomControlsHtml()}</div>
         <div class="time-display" id="time-display">00:00.000 / 00:00.000</div>
       </div>
       <div class="summary-row">

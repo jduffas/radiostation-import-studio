@@ -218,6 +218,9 @@ main {
 
 .zoom-group { display: flex; align-items: center; gap: 6px; }
 
+.zoom-slider { width: 130px; }
+.zoom-slider:disabled { opacity: 0.4; }
+
 .zoom-level {
   font-family: 'Courier New', monospace;
   font-size: 0.85rem;

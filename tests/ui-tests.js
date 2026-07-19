@@ -120,11 +120,11 @@ async function waitUp(url, ms = 8000) {
   await sleep(1500);
   check('UI fichiers: bouton détection auto sans erreur JS', pageErrors.length === 0, pageErrors.join(' ; '));
 
-  // Zoom avant/arrière/reset
-  await page.click('#btn-zoom-in');
-  await page.click('#btn-zoom-in');
+  // Zoom : slider (glissé continu, remplace les boutons ➕/➖ le 19 juil 2026) — 376 ≈
+  // niveau 4 (mapping exponentiel ZOOM_MIN=1..ZOOM_MAX=40 sur 0..1000, cf. app.js).
+  await page.$eval('#zoom-slider', el => { el.value = '376'; el.dispatchEvent(new Event('input')); });
   let zl = await page.textContent('#zoom-level');
-  check('UI fichiers: zoom ×4', zl.trim() === '×4', zl);
+  check('UI fichiers: zoom ~×4 (slider)', /^×4(\.\d+)?$/.test(zl.trim()), zl);
   await page.click('#btn-zoom-reset');
   zl = await page.textContent('#zoom-level');
   check('UI fichiers: zoom reset ×1', zl.trim() === '×1', zl);
@@ -241,7 +241,7 @@ async function waitUp(url, ms = 8000) {
   await page.$eval('#vol-slider', el => { el.value = '-6'; el.dispatchEvent(new Event('input')); });
   check('UI fichiers: mode volume, -6.0 dB affiché', (await page.textContent('#vol-value')).includes('-6.0'));
   // Courbe d'automation (v1.9) : zoom verrouillé + clic sur la ligne → point ajouté
-  check('UI fichiers: zoom verrouillé en mode volume', await page.$eval('#btn-zoom-in', el => el.disabled));
+  check('UI fichiers: zoom verrouillé en mode volume', await page.$eval('#zoom-slider', el => el.disabled));
   // La zone de frappe est une <line> SVG (bounding box de hauteur nulle → « hidden » pour
   // Playwright) : clic aux coordonnées de la ligne 0 dB (y = 12/72 de la hauteur de l'overlay).
   await page.waitForSelector('.vol-overlay', { state: 'attached', timeout: 5000 });
@@ -255,6 +255,12 @@ async function waitUp(url, ms = 8000) {
   // depuis le coin haut-gauche doit régler fadeInMs (champ #fade-in-s synchronisé en direct).
   await page.waitForSelector('.fade-overlay', { state: 'attached', timeout: 5000 });
   const fadeInBefore = Number(await page.$eval('#fade-in-s', el => el.value));
+  // scrollIntoViewIfNeeded : page.mouse.move/down/up (contrairement à locator.click()) ne
+  // scrolle pas automatiquement la cible dans le viewport — la poignée peut se retrouver
+  // hors écran (y négatif) selon la hauteur cumulée des étapes précédentes, faisant
+  // atterrir le mousedown dans le vide (signalé 19 juil 2026, après le passage du zoom en
+  // slider qui a légèrement changé la hauteur de la barre de contrôles).
+  await page.locator('.fade-svg').scrollIntoViewIfNeeded();
   const fadeSvgBox = await page.locator('.fade-svg').boundingBox();
   await page.mouse.move(fadeSvgBox.x, fadeSvgBox.y);
   await page.mouse.down();

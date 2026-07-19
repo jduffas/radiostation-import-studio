@@ -113,9 +113,14 @@ function parseCueOut(txt) {
   check('×1 : position DOM du marqueur alignée (±2 px)', domErr1 <= 2, `${domErr1.toFixed(1)} px`);
 
   // ---- Zoom ×8 ----
-  for (let i = 0; i < 3; i++) await page.click('#btn-zoom-in');
+  // Slider (glissé continu, remplace les boutons ➕/➖ le 19 juil 2026) : mapping exponentiel
+  // ZOOM_MIN=1..ZOOM_MAX=40 sur 0..1000 (cf. sliderFromZoomLevel/zoomLevelFromSlider dans
+  // app.js) — valeur 564 ≈ niveau 8.01, pas exactement 8 (approximation acceptée, contrôle
+  // continu). 1000*log(8)/log(40) ≈ 563.7.
+  await page.$eval('#zoom-slider', el => { el.value = '564'; el.dispatchEvent(new Event('input')); });
   await sleep(300);
-  check('×8 : niveau affiché', (await page.textContent('#zoom-level')).trim() === '×8');
+  const zoomLevelTxt = (await page.textContent('#zoom-level')).trim();
+  check('×8 : niveau affiché (~×8)', /^×8(\.\d+)?$/.test(zoomLevelTxt), zoomLevelTxt);
   const keepBox8 = await page.locator(keepSel).boundingBox();
   const pxPerSec8 = keepBox8.width / DUR;
   console.log(`  (info) ×8 : ${pxPerSec8.toFixed(1)} px/s → 1 px = ${(1000 / pxPerSec8).toFixed(2)} ms`);
