@@ -1159,7 +1159,9 @@ function renderModePanel() {
             <option value="precise_eco">Précise éco (IA, CPU limité)</option>
           </select>
         </label>
-        ${analyzed ? '' : `<button class="btn-ctrl" id="btn-vocal-analyze" title="Détecte les passages sans voix de cette piste (analyse à la demande, jamais automatique)">🔍 Analyser la voix</button>`}
+        ${analyzed
+          ? `<button class="btn-ctrl" id="btn-vocal-analyze" title="Relance l'analyse sur cette piste (utile après avoir changé la précision ci-dessus)">🔄 Relancer l'analyse</button>`
+          : `<button class="btn-ctrl" id="btn-vocal-analyze" title="Détecte les passages sans voix de cette piste (analyse à la demande, jamais automatique)">🔍 Analyser la voix</button>`}
       </div>
       <div class="panel-row">
         ${analyzed ? `<button class="btn-ctrl" id="btn-overlay-suggest" ${zones.length ? '' : 'disabled'} title="Recale la zone verte sur le passage sans voix le plus pertinent détecté par l'analyse">✨ Appliquer la zone suggérée</button>` : ''}
@@ -1170,7 +1172,7 @@ function renderModePanel() {
       </div>`
     updateOverlayInfo()
     const $analyze = document.getElementById('btn-vocal-analyze')
-    if ($analyze) $analyze.onclick = ensureVocalZones
+    if ($analyze) $analyze.onclick = analyzed ? relaunchVocalAnalysis : ensureVocalZones
     const $suggest = document.getElementById('btn-overlay-suggest')
     if ($suggest) $suggest.onclick = () => applyBestVocalZone(true)
     const $add = document.getElementById('btn-overlay-add')
@@ -1901,6 +1903,25 @@ function removeOverlayZone() {
   trimMarkers.overlayEnd = null
   trimMarkers.overlayTouched = true
   renderModePanel()
+}
+
+// Une fois `vocalZones` posé (non null), le bouton « Analyser la voix » disparaissait pour
+// toujours (cf. `analyzed` dans renderModePanel) — aucun moyen de changer de précision
+// (#vocal-level) et de relancer sur la même piste, même après avoir supprimé la zone
+// (signalé 19 juil 2026). `vocalZones = null` fait retraverser `ensureVocalZones()` par le
+// chemin "jamais analysé" (nouvel appel réseau avec le niveau actuellement sauvegardé).
+function relaunchVocalAnalysis() {
+  if (!trimMarkers) return
+  trimMarkers.vocalZones = null
+  // Une zone encore auto-suggérée (jamais touchée par l'utilisateur) est remplacée par le
+  // nouveau résultat ; une zone posée/retirée explicitement est laissée intacte (de toute
+  // façon jamais écrasée par l'auto-application, cf. overlayTouched dans ensureVocalZones).
+  if (!trimMarkers.overlayTouched && trimMarkers.overlayStart != null) {
+    if (trimMarkers.overlayRegion) { trimMarkers.overlayRegion.remove(); trimMarkers.overlayRegion = null }
+    trimMarkers.overlayStart = null
+    trimMarkers.overlayEnd = null
+  }
+  ensureVocalZones()
 }
 
 // Restaure les cue points/zone jingle déjà confirmés lors d'un passage précédent sur cette

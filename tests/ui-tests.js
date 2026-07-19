@@ -153,7 +153,20 @@ async function waitUp(url, ms = 8000) {
     const p = document.getElementById('mode-panel');
     return p && !p.textContent.includes('Analyse de la voix en cours');
   }, { timeout: 20000 });
-  check('UI fichiers: bouton "Analyser la voix" disparaît après analyse', !(await page.isVisible('#btn-vocal-analyze')));
+  // Le bouton ne doit PLUS disparaître après analyse (signalé 19 juil 2026 : impossible de
+  // changer de précision et de relancer sur la même piste) — il se renomme "Relancer
+  // l'analyse" et reste cliquable, y compris après suppression de la zone.
+  check('UI fichiers: bouton devient "Relancer l\'analyse" après analyse',
+    (await page.textContent('#btn-vocal-analyze') || '').includes('Relancer'));
+  await page.click('#btn-vocal-analyze');
+  await page.waitForSelector('.vocal-loading-banner', { timeout: 5000 });
+  await page.waitForFunction(() => {
+    const p = document.getElementById('mode-panel');
+    return p && !p.textContent.includes('Analyse de la voix en cours');
+  }, { timeout: 20000 });
+  check('UI fichiers: "Relancer l\'analyse" relance bien une analyse (bannière rejouée)', true);
+  check('UI fichiers: bouton "Relancer l\'analyse" toujours présent après relance',
+    (await page.textContent('#btn-vocal-analyze') || '').includes('Relancer'));
   // Sinus continu = aucune zone sans voix attendue → pose manuelle de la zone
   await page.click('#btn-overlay-add');
   const overlayInfo = await page.textContent('#overlay-info');
