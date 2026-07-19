@@ -138,6 +138,43 @@ async function waitUp(url, ms = 8000) {
     sigBefore !== null && sigAfter !== null && sigBefore === sigAfter,
     `avant=${sigBefore} après=${sigAfter}`);
 
+  // ---- Régression : intro quasi silencieuse — main.js::detectLoudnessLufs lisait la valeur
+  // ebur128 CUMULATIVE d'un bloc pas encore convergé (mesurée sur l'intro calme, très loin de
+  // la vraie loudness du titre) au lieu du résumé final "Summary". Signalé par l'utilisateur
+  // (écart +0.8/+1.1 dB observé) puis creusé : sur cette fixture, la valeur fautive était
+  // ~-44.7 LUFS au lieu de ~-15.7 réels — le gain de normalisation auto saturait alors au
+  // clamp ±24 dB au lieu du petit gain réellement nécessaire. Testé en réimportant le fichier
+  // TEL QUE TRAITÉ par le round précédent (fetch /files/preview → réupload), 3 fois de suite
+  // — simule enregistrement + réimport réel : la valeur annoncée doit rester stable ET
+  // proche de -14 à chaque passage, jamais dériver. ----
+  let currentFixturePath = path.join(SCRATCH, '.tmp', 'fixtures', 'quiet-intro.wav');
+  if (!fs.existsSync(currentFixturePath)) { console.error('fixture manquante, lancer generate-fixtures.sh'); process.exit(2); }
+  const lufsSeen = [];
+  for (let round = 1; round <= 3; round++) {
+    await page.goto(BASE, { waitUntil: 'networkidle' });
+    await page.waitForSelector('#btn-mode-files', { timeout: 5000 });
+    await page.click('#btn-mode-files');
+    await page.waitForSelector('#files-input', { timeout: 5000, state: 'attached' });
+    const [uploadRespQ] = await Promise.all([
+      page.waitForResponse(r => r.url().includes('/files/upload') && r.status() === 200),
+      page.setInputFiles('#files-input', currentFixturePath),
+    ]);
+    const uploadBodyQ = await uploadRespQ.json();
+    console.log(`  (info) intro calme, round ${round} : loudness_lufs = ${uploadBodyQ.loudness_lufs}`);
+    lufsSeen.push(uploadBodyQ.loudness_lufs);
+    check(`intro calme (round ${round}) : loudness_lufs proche de -14 (pas une valeur transitoire fausse)`,
+      uploadBodyQ.loudness_lufs != null && Math.abs(uploadBodyQ.loudness_lufs - (-14)) <= 1.0,
+      JSON.stringify(uploadBodyQ.loudness_lufs));
+    // Réimporte EXACTEMENT le fichier tel que traité par ce round (fetch /files/preview,
+    // servi par main.js) pour le round suivant — simule un enregistrement + réimport réel.
+    const roundBuf = await (await fetch(`${BASE}/files/preview/${uploadBodyQ.file_id}`)).arrayBuffer();
+    const roundPath = path.join(SCRATCH, '.tmp', `quiet-intro-round${round}.wav`);
+    fs.writeFileSync(roundPath, Buffer.from(roundBuf));
+    currentFixturePath = roundPath;
+  }
+  check('intro calme : valeur stable sur 3 imports successifs (pas de dérive)',
+    lufsSeen.every(v => v != null && Math.abs(v - lufsSeen[0]) <= 0.2), JSON.stringify(lufsSeen));
+
   // ---- Régression : fichier DÉJÀ à -14 LUFS AVANT même l'upload (pas besoin de gain à
   // l'import, performAutoNormalize skip < 0.5 dB côté serveur local) — signalé par
   // l'utilisateur : /files/upload renvoyait loudness_lufs=null dans CE cas précis (skip

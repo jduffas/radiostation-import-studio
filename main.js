@@ -1534,13 +1534,18 @@ function detectLoudnessLufs(filePath) {
     proc.stderr.on('data', d => { stderr += d.toString(); });
     proc.on('error', () => resolve(null));
     proc.on('close', () => {
-      // Port fidèle de audio_analysis.py::_detect_loudness_lufs : itère toutes les lignes
-      // "I: … LUFS" (mesures par seconde ET résumé final) et retient la PREMIÈRE dans les
-      // bornes [-60, 0] — mêmes premières lignes hors-bornes (ex. -70.0 LUFS, mesure à
-      // faible confiance en tout début de flux) que côté backend, donc même comportement.
-      const re = /\bI:\s*([-\d.]+)\s*LUFS/g;
-      let m;
-      while ((m = re.exec(stderr)) !== null) {
+      // Ne lire QUE le "I:" du bloc "Summary" final ("Integrated loudness:\n    I: X LUFS"),
+      // JAMAIS les lignes "I:" par bloc affichées pendant l'analyse (une par ~100ms, valeur
+      // CUMULATIVE pas encore convergée en début de fichier). ⚠️ Cette fonction prétendait
+      // à tort être un "port fidèle" du backend : elle avait gardé l'ANCIENNE regex
+      // ligne-par-ligne que audio_analysis.py::_detect_loudness_lufs a corrigée depuis (cf.
+      // mémoire normalize_editors_lufs_feature "Bug 2") — jamais reportée ici. Sur un titre
+      // avec une intro quasi silencieuse, la valeur retenue pouvait être fausse de PLUSIEURS
+      // DIZAINES de LU (mesuré : -44.7 annoncé au lieu de -15.7 réel sur une fixture de
+      // test), le gain de normalisation auto saturant alors au clamp ±24 dB — pas un simple
+      // écart de mesure de <1 dB comme les autres bugs déjà documentés dans ce fichier.
+      const m = /Integrated loudness:\s*\n\s*I:\s*([-\d.]+)\s*LUFS/.exec(stderr);
+      if (m) {
         const lufs = parseFloat(m[1]);
         if (lufs >= -60 && lufs <= 0) return resolve(Math.round(lufs * 10) / 10);
       }

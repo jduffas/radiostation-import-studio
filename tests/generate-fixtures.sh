@@ -11,6 +11,12 @@ ffmpeg -y -v error -f lavfi -i "sine=frequency=440:duration=10" -ar 44100 -ac 2 
 # nécessite un VRAI gain de normalisation (~-21.8 LUFS avant, testée ailleurs).
 ffmpeg -y -v error -f lavfi -i "sine=frequency=440:duration=10" -af "volume=7.8dB" -ar 44100 -ac 2 "$DIR/already-normalized.wav"
 ffmpeg -y -v error -f lavfi -i "aevalsrc=0:d=2[s1];sine=f=440:d=5[t0];[t0]volume=0.8[t];aevalsrc=0:d=1.5[s2];[s1][t][s2]concat=n=3:v=0:a=1" -ar 44100 -ac 2 "$DIR/padded.wav"
+# Intro quasi silencieuse (3s) + corps bruit rose (15s, ~-15.7 LUFS réel) — reproduit le bug
+# main.js::detectLoudnessLufs qui lisait la valeur ebur128 CUMULATIVE d'un bloc pas encore
+# convergé (mesurée sur l'intro : ~-44.7 LUFS annoncés au lieu de la vraie mesure finale) au
+# lieu du résumé final "Summary: Integrated loudness". Un titre réel avec une intro calme/
+# fade-in suffit à déclencher ce cas — pas un cas extrême artificiel.
+ffmpeg -y -v error -f lavfi -i "anoisesrc=d=3:c=pink:a=0.02[intro];anoisesrc=d=15:c=pink:a=0.9[body];[intro][body]concat=n=2:v=0:a=1" -ar 44100 -ac 2 "$DIR/quiet-intro.wav"
 # Simulation voix/instrumental pour vocal-analysis-tests.js : « voix » = bruit rose dans la
 # bande 300-3000 Hz (celle que l'analyse isole), « instrumental calme » = sinus 60 Hz hors
 # bande, « pont brillant » = bruit rose 1500-3400 Hz À PLEIN VOLUME (critère tilt spectral v2 :
