@@ -77,7 +77,7 @@ try {
 // ============================================================
 
 let ripState = {
-  status: 'idle', // idle | detecting | ripping | analyzing | trimming | uploading | done | error
+  status: 'idle', // idle | detecting | ripping | normalizing | trimming | uploading | done | error
   totalTracks: 0,
   currentTrack: 0,
   progress: 0,
@@ -113,7 +113,7 @@ const LEGACY_SETTINGS_PATH = path.join(os.homedir(), '.radiostation-cd-ripper', 
 // (créé par une version antérieure de l'app, sans cette clé) active quand même la
 // normalisation auto par défaut, au lieu de la voir retomber à `undefined` (falsy).
 const DEFAULT_SETTINGS = {
-  vocal_analysis_enabled: false, fast_rip_enabled: false, vocal_analysis_level: 'fast',
+  fast_rip_enabled: false, vocal_analysis_level: 'fast',
   normalize_on_import_enabled: true,
 };
 
@@ -1720,8 +1720,6 @@ async function doRip(backendUrl, authToken, trackNumbers = null, trackOverrides 
     }
 
     // ---- Normalisation automatique -14 LUFS (optionnelle, réglage local à l'app) ----
-    // Faite ici (après écriture, avant l'analyse vocale) — même ordre que le service
-    // backend `audio_normalize.py` côté site.
     if (loadSettings().normalize_on_import_enabled) {
       ripState.status = 'normalizing';
       for (let i = 0; i < files.length; i++) {
@@ -1729,26 +1727,6 @@ async function doRip(backendUrl, authToken, trackNumbers = null, trackOverrides 
         ripState.progress = 60 + Math.round((i / files.length) * 10); // 60→70 %
         const normalizedLufs = await performAutoNormalize(files[i].filePath);
         if (normalizedLufs != null) files[i].meta.loudness_lufs = normalizedLufs;
-      }
-    }
-
-    ripState.progress = 70;
-
-    // ---- Analyse vocale (optionnelle) ----
-    if (loadSettings().vocal_analysis_enabled) {
-      ripState.status = 'analyzing';
-      for (let i = 0; i < files.length; i++) {
-        ripState.currentTrack = i + 1;
-        ripState.progress = 70 + Math.round((i / files.length) * 15); // 70→85 %
-        console.log(`[analyzeVocal] Analyse piste ${i + 1}/${files.length} : ${files[i].filePath}`);
-        const zones = await analyzeVocalZones(files[i].filePath, null);
-        files[i]._vocalAnalyzed = true; // évite une ré-analyse via /rip/analyze-vocal si 0 zone
-        if (zones.length > 0) {
-          files[i].meta.vocal_zones = zones;
-          console.log(`[analyzeVocal] Piste ${i + 1} : ${zones.length} zone(s) détectée(s), meilleure = ${zones[0].duration_ms}ms`);
-        } else {
-          console.log(`[analyzeVocal] Piste ${i + 1} : aucune zone détectée`);
-        }
       }
     }
 
@@ -1762,8 +1740,9 @@ async function doRip(backendUrl, authToken, trackNumbers = null, trackOverrides 
       name: f.name,
       trackNumber: f.meta.track_number,
       title: f.meta.title,
-      // Zones sans voix détectées au rip (si vocal_analysis_enabled) — pré-remplissent le
-      // mode « Jingle intérieur » de l'éditeur sans round-trip /rip/analyze-vocal.
+      // Zones sans voix : jamais calculées au rip (analyse désormais toujours à la demande,
+      // cf. /rip/analyze-vocal), donc toujours null ici tant que l'utilisateur n'a pas
+      // cliqué « Analyser la voix » dans le mode « Jingle intérieur » de l'éditeur.
       vocalZones: f.meta.vocal_zones || null,
       // Mesure post-gain de la normalisation auto (si normalize_on_import_enabled) —
       // pré-remplit l'affichage "Mesuré" de l'outil Volume sans round-trip ni redécodage.
@@ -1936,7 +1915,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (req.method === 'POST' && pathname === '/rip') {
-    if (['detecting', 'ripping', 'analyzing', 'trimming', 'uploading'].includes(ripState.status)) {
+    if (['detecting', 'ripping', 'normalizing', 'trimming', 'uploading'].includes(ripState.status)) {
       return jsonResp(res, 409, { error: 'Rip déjà en cours' });
     }
     let body = '';
@@ -2014,8 +1993,8 @@ const server = http.createServer(async (req, res) => {
   }
 
   // ── Analyse vocale à la demande pendant 'trimming' (mode « Jingle intérieur ») ──
-  // Utile quand le réglage vocal_analysis_enabled était désactivé au moment du rip :
-  // l'éditeur peut quand même demander les zones sans voix d'une piste déjà rippée.
+  // Toujours déclenchée par l'utilisateur (bouton « Analyser la voix » de l'éditeur),
+  // jamais automatiquement au rip.
   if (req.method === 'POST' && pathname === '/rip/analyze-vocal') {
     if (ripState.status !== 'trimming' || !_pendingRip) {
       return jsonResp(res, 409, { error: 'Aucune piste en attente de coupe' });
@@ -2161,8 +2140,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   // ── Analyse vocale d'un fichier local (mode « Jingle intérieur » de l'éditeur) ──
-  // Pendant CD, l'analyse tourne au rip (réglage vocal_analysis_enabled) ; pour les
-  // fichiers locaux elle est faite à la demande, au premier passage dans le mode jingle.
+  // Toujours à la demande, sur clic du bouton « Analyser la voix » (jamais automatique).
   if (req.method === 'POST' && pathname === '/files/analyze-vocal') {
     let body = '';
     req.on('data', c => { body += c; });
@@ -2437,9 +2415,8 @@ const server = http.createServer(async (req, res) => {
       try { payload = JSON.parse(body); } catch { /* ignore */ }
       // Les trays natifs (Swift/C#/Python) spawnent ce serveur en process séparé — cet endpoint
       // HTTP est leur seul moyen d'écrire dans settings.json, y compris pour stocker
-      // server_url/device_token après un appairage (Phase 2c) — pas seulement vocal_analysis_enabled.
+      // server_url/device_token après un appairage (Phase 2c) — pas seulement vocal_analysis_level.
       const updates = {};
-      if (payload.vocal_analysis_enabled !== undefined) updates.vocal_analysis_enabled = !!payload.vocal_analysis_enabled;
       if (payload.vocal_analysis_level !== undefined && ['fast', 'precise', 'precise_eco'].includes(payload.vocal_analysis_level)) updates.vocal_analysis_level = payload.vocal_analysis_level;
       if (payload.fast_rip_enabled !== undefined) updates.fast_rip_enabled = !!payload.fast_rip_enabled;
       if (payload.normalize_on_import_enabled !== undefined) updates.normalize_on_import_enabled = !!payload.normalize_on_import_enabled;

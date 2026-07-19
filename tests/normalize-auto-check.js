@@ -40,7 +40,7 @@ async function waitUp(url, ms = 8000) {
   // normalize_on_import_enabled explicitement true (comportement par défaut, posé ici pour
   // que le test reste correct même si le défaut change un jour).
   fs.writeFileSync(path.join(HOME, '.radiostation-import-studio', 'settings.json'),
-    JSON.stringify({ vocal_analysis_enabled: false, fast_rip_enabled: false, normalize_on_import_enabled: true, server_url: STUB, device_token: 'tok-normalize-auto' }));
+    JSON.stringify({ fast_rip_enabled: false, normalize_on_import_enabled: true, server_url: STUB, device_token: 'tok-normalize-auto' }));
 
   const stub = spawn('node', [path.join(SCRATCH, 'stub-backend.js')], { stdio: 'ignore', env: { ...process.env, STUB_PORT: String(STUB_PORT) } });
   const srv = spawn('node', ['main.js'], {

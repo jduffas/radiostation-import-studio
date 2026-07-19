@@ -39,7 +39,7 @@ async function waitUp(url, ms = 8000) {
   // bas, qui a justement besoin d'un fichier resté à son niveau d'origine pour vérifier son
   // propre calcul de gain (test dédié, distinct de la normalisation auto à l'import).
   fs.writeFileSync(path.join(HOME, '.radiostation-import-studio', 'settings.json'),
-    JSON.stringify({ vocal_analysis_enabled: false, fast_rip_enabled: false, normalize_on_import_enabled: false, server_url: STUB, device_token: 'tok-ui' }));
+    JSON.stringify({ fast_rip_enabled: false, normalize_on_import_enabled: false, server_url: STUB, device_token: 'tok-ui' }));
 
   const stub = spawn('node', [path.join(SCRATCH, 'stub-backend.js')], { stdio: 'ignore', env: { ...process.env, STUB_PORT: String(STUB_PORT) } });
   const srv = spawn('node', ['main.js'], {
@@ -64,10 +64,11 @@ async function waitUp(url, ms = 8000) {
   check('UI: indicateur "Connecté à"', pairing.includes('Connecté à'), pairing);
   await page.waitForSelector('#btn-mode-files', { timeout: 5000 });
   check('UI: sélecteur de mode affiché', true);
-  // "Rip rapide"/"Analyse vocale" ne concernent que la lecture physique d'un CD (pré-calcul
-  // pendant le rip pour Analyse vocale) → masqués au sélecteur de mode.
+  // "Rip rapide" ne concerne que la lecture physique d'un CD → masqué au sélecteur de mode.
   check('UI: "Rip rapide" masqué hors mode CD (sélecteur de mode)', !(await page.isVisible('#fast-rip-label')));
-  check('UI: "Analyse vocale" masqué hors mode CD (sélecteur de mode)', !(await page.isVisible('#vocal-toggle-label')));
+  // Le pré-calcul "Analyse vocale" au rip CD a été retiré (redondant/confus avec le bouton
+  // adaptatif du mode jingle) : le toggle n'existe plus nulle part dans l'UI.
+  check('UI: "Analyse vocale" (pré-calcul rip) absent du DOM', (await page.$('#vocal-toggle-label')) === null);
 
   // Mode CD : écran "Aucun disque" (pas de CD sur ce Pi), bouton désactivé, retour
   await page.click('#btn-mode-cd');
@@ -75,7 +76,7 @@ async function waitUp(url, ms = 8000) {
   const tocDisabled = await page.$eval('#btn-toc', el => el.disabled);
   check('UI CD: sans CD → bouton pistes désactivé', tocDisabled === true);
   check('UI CD: "Rip rapide" visible en mode CD', await page.isVisible('#fast-rip-label'));
-  check('UI CD: "Analyse vocale" visible en mode CD', await page.isVisible('#vocal-toggle-label'));
+  check('UI CD: "Analyse vocale" (pré-calcul rip) absent en mode CD', (await page.$('#vocal-toggle-label')) === null);
   await page.click('#btn-back-mode');
   await page.waitForSelector('#btn-mode-files', { timeout: 5000 });
   check('UI CD: retour sélecteur de mode', true);
@@ -84,7 +85,6 @@ async function waitUp(url, ms = 8000) {
   await page.click('#btn-mode-files');
   await page.waitForSelector('#files-input', { timeout: 5000, state: 'attached' });
   check('UI fichiers: "Rip rapide" masqué en mode fichiers', !(await page.isVisible('#fast-rip-label')));
-  check('UI fichiers: "Analyse vocale" masqué en mode fichiers (redondant avec le bouton adaptatif du mode jingle)', !(await page.isVisible('#vocal-toggle-label')));
   await page.setInputFiles('#files-input', path.join(SCRATCH, '.tmp', 'fixtures', 'Artist One - Nice Song.wav'));
 
   // Écran d'édition : waveform + résumé
@@ -137,12 +137,19 @@ async function waitUp(url, ms = 8000) {
   // "Détecter les silences" (mode cue points) n'a pas de sens en mode jingle — le mode
   // jingle a son propre bouton adaptatif ("Proposer depuis la voix détectée" ci-dessous).
   check('UI fichiers: bouton détection silences absent en mode jingle', !(await page.isVisible('#btn-auto-cue')));
+  // L'analyse vocale n'est PLUS déclenchée automatiquement à l'ouverture de l'onglet
+  // (signalé : se lançait seule sans que l'utilisateur l'ait demandé) — le bouton "Analyser
+  // la voix" doit être immédiatement disponible, sans bannière de chargement ni round-trip.
+  check('UI fichiers: pas d\'analyse auto à l\'ouverture du mode jingle', !(await page.isVisible('.vocal-loading-banner')));
+  check('UI fichiers: bouton "Analyser la voix" visible (déclenchement manuel)', await page.isVisible('#btn-vocal-analyze'));
+  await page.click('#btn-vocal-analyze');
   // Attendre la fin de l'analyse vocale à la demande (le panneau se re-rend à la fin —
   // cliquer pendant l'analyse risquerait un élément détaché)
   await page.waitForFunction(() => {
     const p = document.getElementById('mode-panel');
     return p && !p.textContent.includes('Analyse de la voix en cours');
   }, { timeout: 20000 });
+  check('UI fichiers: bouton "Analyser la voix" disparaît après analyse', !(await page.isVisible('#btn-vocal-analyze')));
   // Sinus continu = aucune zone sans voix attendue → pose manuelle de la zone
   await page.click('#btn-overlay-add');
   const overlayInfo = await page.textContent('#overlay-info');

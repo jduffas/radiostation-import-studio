@@ -12,8 +12,6 @@ import { integratedLufs, peakDbfs } from './loudness.js'
 
 const $app = document.getElementById('app')
 const $pairingIndicator = document.getElementById('pairing-indicator')
-const $vocalToggle = document.getElementById('vocal-toggle')
-const $vocalToggleLabel = document.getElementById('vocal-toggle-label')
 const $fastRipToggle = document.getElementById('fast-rip-toggle')
 const $fastRipLabel = document.getElementById('fast-rip-label')
 const $normalizeToggle = document.getElementById('normalize-toggle')
@@ -30,12 +28,6 @@ function updatePageTitle() {
   // "Rip rapide" (cdparanoia -Z) ne concerne que la lecture physique d'un CD — masqué hors
   // du mode CD (sélecteur de mode, import fichiers) où il n'a aucun effet.
   if ($fastRipLabel) $fastRipLabel.style.display = appMode === 'cd' ? '' : 'none'
-  // "Analyse vocale" ne fait que PRÉ-calculer les zones jingle pendant le rip CD (sinon
-  // calculées à la demande, sans réglage, au premier passage en mode jingle — cf.
-  // ensureVocalZones) : sans effet en mode fichiers, où le bouton de détection du mode
-  // jingle fait le même travail à la demande quoi qu'il arrive. Masqué hors mode CD, comme
-  // "Rip rapide" (signalé : redondant/confus avec le bouton adaptatif du mode jingle).
-  if ($vocalToggleLabel) $vocalToggleLabel.style.display = appMode === 'cd' ? '' : 'none'
 }
 
 let settings = {}
@@ -163,7 +155,6 @@ async function init() {
     settings = {}
   }
   updatePairingIndicator()
-  $vocalToggle.checked = !!settings.vocal_analysis_enabled
   $fastRipToggle.checked = !!settings.fast_rip_enabled
   // Actif par défaut (undefined → true) — cohérent avec le réglage équivalent côté site
   // (`audio.normalize_on_import`, défaut true) et avec le fallback DEFAULT_SETTINGS du main
@@ -223,20 +214,6 @@ function updatePairingIndicator() {
 
 // Élément statique du topbar (pas recréé par render()) : câblage une seule fois ici plutôt
 // que dans render(), sinon perte du focus/listener à chaque tick de polling.
-$vocalToggle.onchange = async () => {
-  const enabled = $vocalToggle.checked
-  try {
-    settings = await api('/settings', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ vocal_analysis_enabled: enabled }),
-    })
-  } catch (e) {
-    $vocalToggle.checked = !enabled // revert
-    alert("Impossible de sauvegarder le réglage : " + e.message)
-  }
-}
-
 $fastRipToggle.onchange = async () => {
   const enabled = $fastRipToggle.checked
   try {
@@ -298,7 +275,7 @@ function render() {
     if (localView === 'toc-error') return renderTocError()
     return renderIdle()
   }
-  if (['detecting', 'ripping', 'normalizing', 'analyzing'].includes(status)) return renderProgress(status)
+  if (['detecting', 'ripping', 'normalizing'].includes(status)) return renderProgress(status)
   if (status === 'trimming') return renderTrimming()
   if (status === 'uploading') return renderProgress(status)
   if (status === 'done') return renderFinalize()
@@ -468,7 +445,6 @@ function renderProgress(status) {
     detecting: 'Lecture de la table des matières…',
     ripping: `Rip piste ${currentRipState.currentTrack}/${currentRipState.totalTracks}`,
     normalizing: `Normalisation piste ${currentRipState.currentTrack}/${currentRipState.totalTracks}…`,
-    analyzing: `Analyse vocale piste ${currentRipState.currentTrack}/${currentRipState.totalTracks}…`,
     uploading: 'Envoi des fichiers vers RadioStation…',
   }
   $app.innerHTML = `
@@ -962,7 +938,9 @@ function setEditorMode(mode) {
     trimMarkers.disableDragSel = trimMarkers.regionsPlugin.enableDragSelection({ color: CUT_COLOR })
   }
 
-  if (mode === 'jingle') ensureVocalZones()
+  // Analyse vocale : plus déclenchée automatiquement à l'ouverture de l'onglet (signalé :
+  // se lançait seule, sans que l'utilisateur l'ait demandé) — cf. bouton « Analyser la voix »
+  // dans le panneau du mode, qui appelle ensureVocalZones() sur clic.
 
   // Mode volume : zoom verrouillé à ×1 — la courbe SVG est mappée sur la largeur visible,
   // elle n'est alignée avec la waveform qu'en vue non zoomée (pas de scroll horizontal).
@@ -1126,7 +1104,10 @@ function renderModePanel() {
     }
     const hasZone = trimMarkers.overlayStart != null
     const zones = trimMarkers.vocalZones
-    const detectInfo = zones === null
+    // zones === null : analyse jamais lancée pour cette piste — uniquement sur clic du
+    // bouton « Analyser la voix » (signalé : se déclenchait seule à l'ouverture de l'onglet).
+    const analyzed = zones !== null
+    const detectInfo = !analyzed
       ? ''
       : zones.length
         ? `${zones.length} passage(s) sans voix détecté(s).`
@@ -1138,7 +1119,7 @@ function renderModePanel() {
         Enregistrée à l'import, modifiable ensuite sur le site.
       </p>
       <div class="panel-row">
-        <label class="panel-field" id="vocal-level-label" title="Précision de la détection des zones sans voix, sur CETTE machine. Rapide : filtres audio, ~2 s par titre. Précis : séparation de la voix par réseau de neurones (modèle ~64 Mo téléchargé au premier usage), de l'ordre de la minute par titre selon le processeur — Éco n'utilise que la moitié des cœurs pour garder la machine fluide. S'applique à la prochaine analyse (celle-ci est déjà terminée)."
+        <label class="panel-field" id="vocal-level-label" title="Précision de la détection des zones sans voix, sur CETTE machine. Rapide : filtres audio, ~2 s par titre. Précis : séparation de la voix par réseau de neurones (modèle ~64 Mo téléchargé au premier usage), de l'ordre de la minute par titre selon le processeur — Éco n'utilise que la moitié des cœurs pour garder la machine fluide."
           >Précision
           <select id="vocal-level">
             <option value="fast">Rapide</option>
@@ -1146,15 +1127,18 @@ function renderModePanel() {
             <option value="precise_eco">Précise éco (IA, CPU limité)</option>
           </select>
         </label>
+        ${analyzed ? '' : `<button class="btn-ctrl" id="btn-vocal-analyze" title="Détecte les passages sans voix de cette piste (analyse à la demande, jamais automatique)">🔍 Analyser la voix</button>`}
       </div>
       <div class="panel-row">
-        <button class="btn-ctrl" id="btn-overlay-suggest" ${!(zones && zones.length) ? 'disabled' : ''} title="Recale la zone verte sur le passage sans voix le plus pertinent détecté par l'analyse">✨ Appliquer la zone suggérée</button>
+        ${analyzed ? `<button class="btn-ctrl" id="btn-overlay-suggest" ${zones.length ? '' : 'disabled'} title="Recale la zone verte sur le passage sans voix le plus pertinent détecté par l'analyse">✨ Appliquer la zone suggérée</button>` : ''}
         <button class="btn-ctrl" id="btn-overlay-add" ${hasZone ? 'disabled' : ''} title="Pose une zone de 8 s à la position de lecture">➕ Poser une zone</button>
         <button class="btn-ctrl" id="btn-overlay-remove" ${hasZone ? '' : 'disabled'}>Supprimer la zone</button>
         <span class="panel-info" id="overlay-info"></span>
         <span class="panel-info">${detectInfo}</span>
       </div>`
     updateOverlayInfo()
+    const $analyze = document.getElementById('btn-vocal-analyze')
+    if ($analyze) $analyze.onclick = ensureVocalZones
     const $suggest = document.getElementById('btn-overlay-suggest')
     if ($suggest) $suggest.onclick = () => applyBestVocalZone(true)
     const $add = document.getElementById('btn-overlay-add')
