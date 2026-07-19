@@ -175,6 +175,28 @@ async function waitUp(url, ms = 8000) {
   check('intro calme : valeur stable sur 3 imports successifs (pas de dérive)',
     lufsSeen.every(v => v != null && Math.abs(v - lufsSeen[0]) <= 0.2), JSON.stringify(lufsSeen));
 
+  // ---- Régression : réencodage à perte (mp3, réglages qualité réalistes) — un simple gain
+  // constant (volume=XdB) ne retombe pas sur la cible à ±0.5 dB près même avec un gain
+  // calculé juste (0.6-0.7 dB de résidu mesuré, sur cette fixture ET sur un titre réel signalé
+  // par l'utilisateur, "comme si la normalisation n'avait pas marché"). performAutoNormalize
+  // utilise désormais `loudnorm` 2 passes (mesure + apply, linear=true) au lieu de mesurer
+  // puis appliquer un volume=XdB — doit converger en UNE SEULE passe d'écriture. ----
+  const mp3Fixture = path.join(SCRATCH, '.tmp', 'fixtures', 'real-like.mp3');
+  if (!fs.existsSync(mp3Fixture)) { console.error('fixture manquante, lancer generate-fixtures.sh'); process.exit(2); }
+  await page.goto(BASE, { waitUntil: 'networkidle' });
+  await page.waitForSelector('#btn-mode-files', { timeout: 5000 });
+  await page.click('#btn-mode-files');
+  await page.waitForSelector('#files-input', { timeout: 5000, state: 'attached' });
+  const [uploadRespMp3] = await Promise.all([
+    page.waitForResponse(r => r.url().includes('/files/upload') && r.status() === 200),
+    page.setInputFiles('#files-input', mp3Fixture),
+  ]);
+  const uploadBodyMp3 = await uploadRespMp3.json();
+  console.log(`  (info) mp3 réaliste : loudness_lufs = ${uploadBodyMp3.loudness_lufs}`);
+  check('mp3 (réencodage à perte) : loudness_lufs proche de -14 en UNE passe (pas de résidu ~0.7dB)',
+    uploadBodyMp3.loudness_lufs != null && Math.abs(uploadBodyMp3.loudness_lufs - (-14)) <= 0.5,
+    JSON.stringify(uploadBodyMp3.loudness_lufs));
+
   // ---- Régression : fichier DÉJÀ à -14 LUFS AVANT même l'upload (pas besoin de gain à
   // l'import, performAutoNormalize skip < 0.5 dB côté serveur local) — signalé par
   // l'utilisateur : /files/upload renvoyait loudness_lufs=null dans CE cas précis (skip

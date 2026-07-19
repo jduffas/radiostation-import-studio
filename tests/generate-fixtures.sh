@@ -17,6 +17,12 @@ ffmpeg -y -v error -f lavfi -i "aevalsrc=0:d=2[s1];sine=f=440:d=5[t0];[t0]volume
 # lieu du résumé final "Summary: Integrated loudness". Un titre réel avec une intro calme/
 # fade-in suffit à déclencher ce cas — pas un cas extrême artificiel.
 ffmpeg -y -v error -f lavfi -i "anoisesrc=d=3:c=pink:a=0.02[intro];anoisesrc=d=15:c=pink:a=0.9[body];[intro][body]concat=n=2:v=0:a=1" -ar 44100 -ac 2 "$DIR/quiet-intro.wav"
+# MP3 (à perte, réglages qualité réalistes -q:a 2, PAS le fixture WAV/lossless ci-dessus) —
+# reproduit le résidu de précision propre au réencodage à perte : un simple gain constant
+# (volume=XdB) ne retombe pas sur la cible à ±0.5 dB près même avec un gain calculé juste
+# (0.6-0.7 dB de résidu mesuré). Nécessite `loudnorm` 2 passes (mesure + apply avec les
+# valeurs mesurées, linear=true) pour converger en une seule passe d'écriture.
+ffmpeg -y -v error -f lavfi -i "anoisesrc=d=3:c=pink:a=0.05[intro];anoisesrc=d=20:c=pink:a=0.6[body];[intro][body]concat=n=2:v=0:a=1" -ar 44100 -ac 2 -c:a libmp3lame -q:a 2 "$DIR/real-like.mp3"
 # Simulation voix/instrumental pour vocal-analysis-tests.js : « voix » = bruit rose dans la
 # bande 300-3000 Hz (celle que l'analyse isole), « instrumental calme » = sinus 60 Hz hors
 # bande, « pont brillant » = bruit rose 1500-3400 Hz À PLEIN VOLUME (critère tilt spectral v2 :

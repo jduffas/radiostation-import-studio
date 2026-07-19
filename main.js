@@ -1556,35 +1556,99 @@ function detectLoudnessLufs(filePath) {
 
 // Normalisation automatique à l'import — réglage local à l'app (`normalize_on_import_enabled`,
 // indépendant du réglage équivalent côté site : pas d'appairage réseau garanti au lancement).
-// Même logique de gain que le service backend `audio_normalize.py::normalize_file_sync` :
-// mesure ebur128 + cap anti-écrêtage (peak+gain <= -1 dBFS) + clamp ±24 dB + skip sous 0,5 dB
-// (idempotence — un fichier déjà normalisé ici, ou déjà proche de la cible, n'est pas
-// re-encodé une seconde fois côté backend à l'upload). Réutilise applyAudioEdit (même chemin
-// ffmpeg testé que le bouton manuel « Normaliser » / le montage), pas de pipeline dupliqué.
 const AUTO_NORMALIZE_TARGET_LUFS = -14;
+const AUTO_NORMALIZE_TRUE_PEAK_DBTP = -1.0; // même seuil anti-écrêtage que le reste du code (peak+gain <= -1 dBFS)
 const AUTO_NORMALIZE_SKIP_THRESHOLD_DB = 0.5;
 
+// Port de audio_normalize.py::_CODEC_ARGS (backend) — sans ça, ffmpeg encode la sortie mp3
+// avec ses paramètres par défaut (128 kbps CBR, mesuré) au lieu de préserver une qualité
+// correcte : plus de perte = plus de dérive de la loudness mesurée après réencodage (0.6 dB
+// de résidu constaté avec les défauts ffmpeg vs 0.2 dB avec ces réglages, sur la même
+// fixture mp3 réelle) — en plus d'être un vrai appauvrissement audible du fichier.
+const NORMALIZE_CODEC_ARGS = {
+  '.mp3': ['-c:a', 'libmp3lame', '-q:a', '2'],
+  '.flac': ['-c:a', 'flac'],
+  '.wav': ['-c:a', 'pcm_s16le'],
+  '.ogg': ['-c:a', 'libvorbis', '-q:a', '6'],
+  '.m4a': ['-c:a', 'aac', '-b:a', '192k'],
+  '.aac': ['-c:a', 'aac', '-b:a', '192k'],
+};
+
+// Mesure ebur128+loudnorm (1re passe, `print_format=json`) — nécessaire pour la 2e passe
+// (measured_I/TP/LRA/thresh + offset repris tels quels, cf. doc ffmpeg loudnorm : réutiliser
+// SES PROPRES mesures, pas une mesure ebur128 indépendante, sous peine d'incohérence).
+function measureLoudnorm(filePath) {
+  return new Promise((resolve) => {
+    const proc = spawn(FFMPEG, [
+      '-i', filePath, '-af',
+      `loudnorm=I=${AUTO_NORMALIZE_TARGET_LUFS}:TP=${AUTO_NORMALIZE_TRUE_PEAK_DBTP}:LRA=11:print_format=json`,
+      '-f', 'null', NULL_OUTPUT,
+    ]);
+    let stderr = '';
+    proc.stderr.on('data', d => { stderr += d.toString(); });
+    proc.on('error', () => resolve(null));
+    proc.on('close', () => {
+      const start = stderr.indexOf('{');
+      const end = stderr.lastIndexOf('}');
+      if (start === -1 || end === -1) return resolve(null);
+      try {
+        const j = JSON.parse(stderr.slice(start, end + 1));
+        const inputI = parseFloat(j.input_i);
+        if (!Number.isFinite(inputI) || inputI < -70 || inputI > 0) return resolve(null);
+        resolve(j);
+      } catch { resolve(null); }
+    });
+  });
+}
+
 // Retourne la loudness_lufs RÉELLE du fichier tel qu'il est stocké après cet appel — que le
-// gain ait été appliqué ou skippé (déjà proche de la cible). Port fidèle de
-// audio_normalize.py::normalize_on_import_and_measure (backend) qui remesure TOUJOURS après
-// coup, jamais None juste parce que le skip s'est déclenché — null ici signifie
-// spécifiquement "aucune mesure disponible" (échec ffmpeg), pas "rien à faire".
-// ⚠️ Avant ce fix (signalé par l'utilisateur, écart +0,8 dB constaté), le skip renvoyait
-// null : `/files/upload`/doRip ne renseignaient alors PAS `loudness_lufs`, privant
-// `editorContext.initialLoudnessLufs` (local-ui/app.js) de toute mesure serveur — le bouton
-// Normaliser de l'outil Volume retombait sur la seule remesure client (BS.1770 JS, ±0.5-0.8
-// LU d'écart documenté vs ffmpeg ebur128) et rouvrait un gain résiduel sur un fichier déjà
-// correct, y compris quand le "déjà correct" venait du skip lui-même.
+// gain ait été appliqué ou skippé (déjà proche de la cible). `null` signifie spécifiquement
+// "aucune mesure disponible" (échec ffmpeg), jamais "rien à faire".
+//
+// ⚠️ Historique de cette fonction (3 bugs trouvés le même jour, signalés par l'utilisateur —
+// écarts +0.8 puis +1.1 dB persistants malgré les 2 premiers correctifs) :
+// 1. Le skip (gain déjà négligeable) renvoyait `null` au lieu de la mesure réelle, privant
+//    l'éditeur de toute mesure serveur pour décider d'ignorer un résidu de remesure client.
+// 2. `detectLoudnessLufs` lisait une valeur ebur128 TRANSITOIRE (résumé pas encore convergé)
+//    au lieu du résumé final — écarts pouvant atteindre plusieurs dizaines de LU sur une
+//    intro calme.
+// 3. (CE fix) Même avec 1+2 corrigés, un simple gain constant (`volume=XdB`) + réencodage à
+//    perte (mp3/aac/ogg, le cas courant) ne retombe PAS sur la cible avec une précision
+//    fiable — mesuré ~0.7 dB de résidu sur une fixture mp3 réelle, MÊME en connaissant le
+//    gain exact nécessaire. Une boucle de passes correctives successives NE CONVERGE PAS
+//    (testé : chaque réencodage mp3 introduit son propre bruit de mesure du même ordre que
+//    la correction recherchée — la boucle "chasse du bruit" au lieu de converger, avec en
+//    prime une dégradation de génération en génération pour rien). Fix : `loudnorm` 2 passes
+//    ffmpeg (measure puis apply avec les valeurs mesurées, `linear=true` = gain constant,
+//    PAS de compression dynamique) — mesuré ~0.2 dB de résidu en UNE seule passe d'écriture
+//    sur la même fixture (vs ~0.7 dB avec `volume=XdB` en une passe). `TP` (true peak,
+//    suréchantillonné) remplace le cap anti-écrêtage manuel basé sur `astats` (peak simple
+//    échantillon) — `linear=true` réduit lui-même le gain si la cible TP serait dépassée,
+//    même garantie anti-écrêtage que l'ancien code, plus précise.
 async function performAutoNormalize(filePath) {
   try {
-    const [lufs, stats] = await Promise.all([detectLoudnessLufs(filePath), getVolumeStats(filePath)]);
-    if (lufs == null) return null;
-    const rawGain = AUTO_NORMALIZE_TARGET_LUFS - lufs;
-    const capGain = stats?.max != null ? (-1.0 - stats.max) : rawGain;
-    let gain = Math.min(rawGain, capGain);
-    gain = Math.max(-24, Math.min(24, gain));
-    if (Math.abs(gain) < AUTO_NORMALIZE_SKIP_THRESHOLD_DB) return lufs;
-    await applyAudioEdit(filePath, { volume_db: gain });
+    const measured = await measureLoudnorm(filePath);
+    if (!measured) return null;
+    const inputI = parseFloat(measured.input_i);
+    if (Math.abs(inputI - AUTO_NORMALIZE_TARGET_LUFS) < AUTO_NORMALIZE_SKIP_THRESHOLD_DB) return Math.round(inputI * 10) / 10;
+
+    const ext = path.extname(filePath);
+    const base = ext ? filePath.slice(0, -ext.length) : filePath;
+    const tmpOut = `${base}.normalize-${Date.now()}${ext}`;
+    const filter = `loudnorm=I=${AUTO_NORMALIZE_TARGET_LUFS}:TP=${AUTO_NORMALIZE_TRUE_PEAK_DBTP}:LRA=11:` +
+      `measured_I=${measured.input_i}:measured_TP=${measured.input_tp}:measured_LRA=${measured.input_lra}:` +
+      `measured_thresh=${measured.input_thresh}:offset=${measured.target_offset}:linear=true`;
+    try {
+      const codecArgs = NORMALIZE_CODEC_ARGS[ext.toLowerCase()] || [];
+      await runFfmpeg(['-y', '-i', filePath, '-af', filter, ...codecArgs, tmpOut]);
+      fs.renameSync(tmpOut, filePath);
+    } catch (e) {
+      try { fs.unlinkSync(tmpOut); } catch { /* rien à nettoyer */ }
+      throw e;
+    }
+    // Remesure indépendante (ebur128 simple, PAS loudnorm) du fichier tel qu'écrit sur
+    // disque — source de vérité pour la valeur reportée à l'éditeur, ne fait pas confiance
+    // à la prédiction `output_i` de loudnorm.
     return await detectLoudnessLufs(filePath);
   } catch (e) {
     console.error('[autoNormalize]', e.message);
