@@ -406,6 +406,25 @@ async function waitUp(url, ms = 8000) {
     sumCueInRestored.trim() === '00:01.500', sumCueInRestored);
   check('UI: navigation Précédent sans erreur JS', pageErrors.length === 0, pageErrors.join(' ; '));
 
+  // ---- Différenciation import titre vs jingle/spot/promo : INTRO (Track.intro_ms) et
+  // "Jingle intérieur" (Track.overlay_zone_start_ms/end_ms) n'existent qu'en base sur les
+  // titres — jingle/spot/promo ne doivent ni les afficher ni les proposer dans l'éditeur,
+  // sinon un réglage saisi là serait silencieusement ignoré par /import-jingle. ----
+  await page.goto(BASE, { waitUntil: 'networkidle' });
+  await page.waitForSelector('#btn-mode-files', { timeout: 5000 });
+  await page.click('#btn-mode-files');
+  await page.waitForSelector('#files-content-type', { timeout: 5000 });
+  await page.selectOption('#files-content-type', 'jingle');
+  await page.setInputFiles('#files-input', path.join(SCRATCH, '.tmp', 'fixtures', 'Artist One - Nice Song.wav'));
+  await page.waitForSelector('#btn-confirm-file', { timeout: 15000 });
+  check('UI jingle: onglet "Jingle intérieur" absent', (await page.$('.mode-tab[data-mode="jingle"]')) === null);
+  check('UI jingle: marqueur INTRO absent de la waveform', (await page.$('#waveform [part~="intro-end"]')) === null);
+  check('UI jingle: ligne résumé Intro absente', (await page.$('#sum-intro')) === null);
+  await page.click('.mode-tab[data-mode="cue"]');
+  await page.waitForSelector('#inp-cuein', { timeout: 5000 });
+  check('UI jingle: champ "Fin d\'intro" absent du panneau cue points', (await page.$('#inp-intro')) === null);
+  check('UI jingle: aucune erreur JS (parcours jingle)', pageErrors.length === 0, pageErrors.join(' ; '));
+
   // Erreurs JS globales sur tout le parcours
   check('UI: aucune erreur JS sur tout le parcours', pageErrors.length === 0, pageErrors.join(' ; '));
 

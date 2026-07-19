@@ -492,7 +492,7 @@ function renderTrimming() {
       <div class="card-header">
         Piste ${trimIndex + 1} / ${pending.length} — ${escapeHtml(track.title)}
       </div>
-      ${editorModeTabsHtml()}
+      ${editorModeTabsHtml(true)}
       <div class="waveform-container"><div id="waveform"></div></div>
       <div class="controls-bar">
         <div class="playback-group">
@@ -525,7 +525,9 @@ function renderTrimming() {
       </div>
     </div>`
 
-  editorContext = { flow: 'cd', trackNumber: track.trackNumber, initialVocalZones: track.vocalZones || null, initialLoudnessLufs: track.loudnessLufs ?? null }
+  // Flux CD = toujours un titre musical (cf. mémoire import_multitype_feature : le flux CD
+  // reste titre musical exclusif) → isTrack toujours true, INTRO/Jingle intérieur toujours visibles.
+  editorContext = { flow: 'cd', trackNumber: track.trackNumber, isTrack: true, initialVocalZones: track.vocalZones || null, initialLoudnessLufs: track.loudnessLufs ?? null }
   // Retour arrière (bouton Précédent) sur une piste déjà validée une fois : restaure les
   // cue points/zone jingle confirmés au lieu de rouvrir à l'état par défaut (signalé :
   // "on ne peut pas revenir en arrière"). Rien de stocké pour un "Passer" (localCuePoints
@@ -735,7 +737,11 @@ function setupTrimWaveform(previewUrl, onReady) {
         // Étiquette INTRO décalée verticalement (top 26px) : DÉBUT et INTRO démarrent tous
         // deux à 0 — sans décalage, une étiquette masquerait l'autre et volerait son drag
         // (même problème que SKIP/INTRO superposés dans l'éditeur du site).
-        trimMarkers.introRegion = regions.addRegion({ id: 'intro-end', start: 0, color: 'rgba(255,152,0,0.9)', drag: true, resize: false, content: markerLabel('INTRO', '#ff9800', 26) })
+        // Pas créée pour jingle/spot/promo : Track.intro_ms n'a pas d'équivalent sur ces
+        // types, trimMarkers.introRegion reste null (toutes les lectures sont en `?.`).
+        if (editorContext?.isTrack !== false) {
+          trimMarkers.introRegion = regions.addRegion({ id: 'intro-end', start: 0, color: 'rgba(255,152,0,0.9)', drag: true, resize: false, content: markerLabel('INTRO', '#ff9800', 26) })
+        }
         trimMarkers.cueOutRegion = regions.addRegion({ id: 'cue-out', start: dur, color: 'rgba(244,67,54,0.9)', drag: true, resize: false, content: markerLabel('TRANSITION', '#f44336') })
         // Applique l'interactivité du mode courant (les régions viennent seulement d'exister) —
         // en mode 'cut' par défaut (ordre logique d'utilisation, cf. trimMarkers.mode).
@@ -918,13 +924,17 @@ function zoomControlsHtml() {
 
 // ══ Éditeur unifié (v1.7) : modes, zone jingle intérieur, montage, volume & fondus ══════
 
-function editorModeTabsHtml() {
+// isTrack=false (jingle/spot/promo, flux fichiers) : "Jingle intérieur" masqué — l'overlay
+// intra-piste (overlay_zone_start_ms/end_ms) n'existe qu'en base sur Track, pas sur
+// Jingle/AdSpot/Promo, et les endpoints /import-jingle /import-spot /import-promo n'ont
+// aucun champ pour le recevoir.
+function editorModeTabsHtml(isTrack) {
   return `
     <div class="mode-tabs" id="mode-tabs">
       <button class="mode-tab active" data-mode="cut">✂️ Montage</button>
       <button class="mode-tab" data-mode="volume">🔊 Volume &amp; fondus</button>
       <button class="mode-tab" data-mode="cue">🎯 Cue points</button>
-      <button class="mode-tab" data-mode="jingle">📢 Jingle intérieur</button>
+      ${isTrack ? '<button class="mode-tab" data-mode="jingle">📢 Jingle intérieur</button>' : ''}
     </div>`
 }
 
@@ -1059,24 +1069,27 @@ function renderModePanel() {
   const mode = trimMarkers.mode
 
   if (mode === 'cue') {
+    // INTRO (marqueur + champ + raccourci N) réservé aux titres musicaux — cf. editorModeTabsHtml.
+    const isTrack = editorContext?.isTrack !== false
     $panel.innerHTML = `
       <p class="hint mode-hint">
         <strong>Zone bleue</strong> (toute la piste par défaut) : glissez ses bords pour couper
         le silence/déchet en tête/queue — coupe définitive, avant l'envoi.
-        <strong>DÉBUT</strong> (cyan) / <strong>INTRO</strong> (orange, fin de l'intro parlée/instrumentale)
+        <strong>DÉBUT</strong> (cyan)${isTrack ? ' / <strong>INTRO</strong> (orange, fin de l\'intro parlée/instrumentale)' : ''}
         / <strong>TRANSITION</strong> (rouge) : cue points, aucun n'est obligatoire, affinables après import.
         ${editorContext?.flow === 'files' ? '« Détecter automatiquement » propose des positions à partir des silences détectés. ' : ''}
         Zoomez (➕/➖) pour les placer avec précision.
         Raccourcis pendant la lecture : <strong>Espace</strong> lecture/pause,
-        <strong>I</strong> pose DÉBUT, <strong>N</strong> pose INTRO, <strong>O</strong> pose TRANSITION.
+        <strong>I</strong> pose DÉBUT${isTrack ? ', <strong>N</strong> pose INTRO' : ''}, <strong>O</strong> pose TRANSITION.
       </p>
       <div class="panel-row">
         <label class="panel-field">Début (s)
           <input type="number" id="inp-cuein" min="0" step="0.01" value="${(trimMarkers.cueInPos - trimMarkers.trimStart).toFixed(2)}">
         </label>
+        ${isTrack ? `
         <label class="panel-field">Fin d'intro (s)
           <input type="number" id="inp-intro" min="0" step="0.01" value="${(trimMarkers.introPos - trimMarkers.trimStart).toFixed(2)}">
-        </label>
+        </label>` : ''}
         <label class="panel-field">Transition avant fin (s)
           <input type="number" id="inp-cueout" min="0" step="0.01" value="${(trimMarkers.trimEnd - trimMarkers.cueOutPos).toFixed(2)}">
         </label>
@@ -1095,14 +1108,16 @@ function renderModePanel() {
       clampCueMarkers()
       updateSummary()
     }
-    document.getElementById('inp-intro').onchange = (e) => {
-      const v = Math.max(0, Number(e.target.value) || 0)
-      const pos = Math.max(trimMarkers.cueInPos, Math.min(trimMarkers.trimStart + v, trimMarkers.trimEnd))
-      trimMarkers.introPos = pos
-      trimMarkers.updating = true
-      trimMarkers.introRegion?.setOptions({ start: pos })
-      trimMarkers.updating = false
-      updateSummary()
+    if (isTrack) {
+      document.getElementById('inp-intro').onchange = (e) => {
+        const v = Math.max(0, Number(e.target.value) || 0)
+        const pos = Math.max(trimMarkers.cueInPos, Math.min(trimMarkers.trimStart + v, trimMarkers.trimEnd))
+        trimMarkers.introPos = pos
+        trimMarkers.updating = true
+        trimMarkers.introRegion?.setOptions({ start: pos })
+        trimMarkers.updating = false
+        updateSummary()
+      }
     }
     document.getElementById('inp-cueout').onchange = (e) => {
       const v = Math.max(0, Number(e.target.value) || 0)
@@ -1201,11 +1216,12 @@ function renderModePanel() {
   }
 
   if (mode === 'cut') {
+    const isTrack = editorContext?.isTrack !== false
     $panel.innerHTML = `
       <p class="hint mode-hint">
         <strong>Montage</strong> : cliquez-glissez sur la forme d'onde pour marquer un passage
         à supprimer (zone rouge). Les passages marqués sont retirés définitivement du fichier
-        envoyé — cue points et zone jingle sont recalés automatiquement.
+        envoyé — cue points${isTrack ? ' et zone jingle' : ''} sont recalés automatiquement.
       </p>
       <div class="panel-row"><div class="cut-list" id="cut-list"></div></div>`
     updateCutList()
@@ -2362,12 +2378,17 @@ function renderFilesTrimming() {
   const item = filesItems[filesEditingIndex]
   if (!item) { filesStep = 'select'; render(); return }
 
+  // INTRO (Track.intro_ms) et Jingle intérieur (Track.overlay_zone_start_ms/end_ms) n'existent
+  // qu'en base sur les titres musicaux — jingle/spot/promo n'ont ni l'un ni l'autre, et les
+  // endpoints /import-jingle /import-spot /import-promo ne les acceptent pas en entrée.
+  const isTrack = (item.contentType || 'track') === 'track'
+
   $app.innerHTML = `
     <div class="card">
       <div class="card-header">
         Fichier ${filesEditingIndex + 1} / ${filesItems.length} — ${escapeHtml(item.title || item.name)}
       </div>
-      ${editorModeTabsHtml()}
+      ${editorModeTabsHtml(isTrack)}
       <div class="waveform-container"><div id="waveform"></div></div>
       <div class="controls-bar">
         <div class="playback-group">
@@ -2384,9 +2405,10 @@ function renderFilesTrimming() {
           <span class="summary-dot dot-cyan"></span> Début (skip) : <strong id="sum-cuein">00:00.000</strong>
           <button class="btn-preview" id="btn-preview-start">🔊 Écouter</button>
         </div>
+        ${isTrack ? `
         <div class="summary-item">
           <span class="summary-dot dot-orange"></span> Intro : <strong id="sum-intro">00:00.000</strong>
-        </div>
+        </div>` : ''}
         <div class="summary-item">
           <span class="summary-dot dot-red"></span> Transition (avant fin) : <strong id="sum-cueout">00:00.000</strong>
           <button class="btn-preview" id="btn-preview-end">🔊 Écouter</button>
@@ -2404,7 +2426,7 @@ function renderFilesTrimming() {
       </div>
     </div>`
 
-  editorContext = { flow: 'files', fileId: item.id, initialVocalZones: null, initialLoudnessLufs: item.loudnessLufs ?? null }
+  editorContext = { flow: 'files', fileId: item.id, isTrack, initialVocalZones: null, initialLoudnessLufs: item.loudnessLufs ?? null }
   setupTrimWaveform(`/files/preview/${item.id}`, () => {
     // Retour arrière (bouton Précédent) sur un fichier déjà validé une fois : restaure les
     // cue points/zone jingle confirmés au lieu de rouvrir à l'état par défaut (signalé :
@@ -2761,7 +2783,7 @@ document.addEventListener('keydown', (e) => {
     wavesurfer.playPause()
   } else if (trimMarkers.mode === 'cue') {
     if (e.code === 'KeyI') { e.preventDefault(); setCueMarkerAtPlayhead('cue-in') }
-    else if (e.code === 'KeyN') { e.preventDefault(); setCueMarkerAtPlayhead('intro') }
+    else if (e.code === 'KeyN' && editorContext?.isTrack !== false) { e.preventDefault(); setCueMarkerAtPlayhead('intro') }
     else if (e.code === 'KeyO') { e.preventDefault(); setCueMarkerAtPlayhead('cue-out') }
   }
 })
