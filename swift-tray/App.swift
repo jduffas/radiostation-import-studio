@@ -25,6 +25,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelega
     private var importWebView: WKWebView?
     private var updateMenuItem: NSMenuItem?
     private var updatePollTimer: Timer?
+    // Évite que le watchdog anti-crash (terminationHandler ci-dessous) ne relance `node` pendant
+    // un arrêt volontaire de l'appli — même bug que celui corrigé côté Windows
+    // (csharp-tray/Program.cs, flag _quitting) : sans ça, un `node` fraîchement relancé peut
+    // survivre à la fermeture de l'appli, orphelin, invisible, verrou sur le port 19847.
+    private var isQuitting = false
 
     // MARK: — Lifecycle
 
@@ -53,8 +58,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelega
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        isQuitting = true
         updatePollTimer?.invalidate()
         nodeProcess?.terminate()
+        nodeProcess?.waitUntilExit() // laisse le temps au process de libérer le port 19847
     }
 
     // MARK: — Barre de menu système
@@ -276,6 +283,20 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelega
                 let target = serverURL?.appendingPathComponent("admin/import/cd")
                     ?? URL(string: "https://github.com/jduffas/radiostation-import-studio/releases/latest")!
                 NSWorkspace.shared.open(target)
+
+                // Pas d'installeur programmable côté Mac (contrairement à Windows/NSIS) — glisser
+                // le nouveau .app dans Applications se fait entièrement via Finder, aucun script
+                // ne peut s'y accrocher pour fermer l'ancienne instance à la place de
+                // l'utilisateur. On automatise ce qu'on peut : proposer de fermer l'appli tout de
+                // suite, pour ne pas avoir à revenir chercher "Quitter" séparément avant d'installer.
+                let alert = NSAlert()
+                alert.messageText = "Fermer l'application ?"
+                alert.informativeText = "Le téléchargement s'ouvre dans le navigateur. Fermez l'application maintenant pour pouvoir installer la nouvelle version par-dessus."
+                alert.addButton(withTitle: "Fermer l'application")
+                alert.addButton(withTitle: "Plus tard")
+                if alert.runModal() == .alertFirstButtonReturn {
+                    NSApplication.shared.terminate(nil)
+                }
             }
         }
     }
@@ -491,12 +512,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelega
             process.standardError  = fh
         }
 
-        // Redémarrage auto uniquement si le process a tourné > 5s (pas un crash au démarrage)
+        // Redémarrage auto uniquement si le process a tourné > 5s (pas un crash au démarrage) —
+        // jamais si l'arrêt vient d'un Quit() volontaire (cf. isQuitting).
         process.terminationHandler = { [weak self] _ in
-            guard let self else { return }
+            guard let self, !self.isQuitting else { return }
             let ran = self.processStartTime.map { Date().timeIntervalSince($0) } ?? 0
             guard ran > 5 else { return }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { self.startNodeServer() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                guard !self.isQuitting else { return }
+                self.startNodeServer()
+            }
         }
 
         do {
