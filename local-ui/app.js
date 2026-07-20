@@ -2218,9 +2218,51 @@ async function sendTrack(i) {
 }
 
 async function sendAllTracks() {
-  for (let i = 0; i < sendResults.length; i++) {
-    if (sendResults[i].status !== 'done') await sendTrack(i)
+  const pending = sendResults.map((_, i) => i).filter(i => sendResults[i].status !== 'done')
+  if (!pending.length) return
+  showSendOverlay(pending.length)
+  let done = 0
+  for (const i of pending) {
+    await sendTrack(i)
+    updateSendOverlay(++done, pending.length)
   }
+  hideSendOverlay()
+}
+
+// ---- Overlay bloquant "Tout envoyer" (pistes CD / fichiers) — spinner + compteur X/Y +
+// jauge de progression, même langage visuel que l'overlay de mise à jour du site
+// (frontend/src/components/settings/SettingsSysteme.vue). sendTrack()/sendFileItem()
+// réécrivent $app.innerHTML à chaque item ; l'overlay est un enfant de <body>, pas de $app,
+// donc il survit à ces re-rendus.
+let sendOverlayEl = null
+
+function showSendOverlay(total) {
+  sendOverlayEl = document.createElement('div')
+  sendOverlayEl.className = 'send-overlay'
+  sendOverlayEl.innerHTML = `
+    <div class="send-overlay-card">
+      <div class="send-overlay-spinner"></div>
+      <p class="send-overlay-title">Envoi en cours…</p>
+      <p class="send-overlay-count">0 / ${total}</p>
+      <div class="send-overlay-progress-bar">
+        <div class="send-overlay-progress-fill" style="width: 0%"></div>
+      </div>
+    </div>
+  `
+  document.body.appendChild(sendOverlayEl)
+}
+
+function updateSendOverlay(done, total) {
+  if (!sendOverlayEl) return
+  const pct = total > 0 ? Math.round((done / total) * 100) : 0
+  const countEl = sendOverlayEl.querySelector('.send-overlay-count')
+  const fillEl = sendOverlayEl.querySelector('.send-overlay-progress-fill')
+  if (countEl) countEl.textContent = `${done} / ${total}`
+  if (fillEl) fillEl.style.width = pct + '%'
+}
+
+function hideSendOverlay() {
+  if (sendOverlayEl) { sendOverlayEl.remove(); sendOverlayEl = null }
 }
 
 function resetAfterDone() {
@@ -2743,9 +2785,15 @@ async function sendFileItem(i) {
 }
 
 async function sendAllFileItems() {
-  for (let i = 0; i < filesItems.length; i++) {
-    if (filesItems[i].sendStatus !== 'done') await sendFileItem(i)
+  const pending = filesItems.map((_, i) => i).filter(i => filesItems[i].sendStatus !== 'done')
+  if (!pending.length) return
+  showSendOverlay(pending.length)
+  let done = 0
+  for (const i of pending) {
+    await sendFileItem(i)
+    updateSendOverlay(++done, pending.length)
   }
+  hideSendOverlay()
 }
 
 function escapeHtml(s) {

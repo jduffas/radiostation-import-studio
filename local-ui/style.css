@@ -600,3 +600,58 @@ code {
 
 .fade-handle-hit:hover .fade-handle:not(.fade-handle-active) { fill: #7db3ee; }
 .fade-handle-active { fill: #ffd940 !important; }
+
+/* Overlay bloquant "Tout envoyer" (pistes CD / fichiers) — même langage visuel que l'overlay
+   de mise à jour du site (frontend/src/components/settings/SettingsSysteme.vue) */
+.send-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  background: rgba(0, 0, 0, 0.82);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.send-overlay-card {
+  background: var(--panel);
+  color: var(--text);
+  border-radius: 16px;
+  padding: 40px 36px 32px;
+  max-width: 420px;
+  width: 90%;
+  text-align: center;
+  box-shadow: 0 8px 40px rgba(0, 0, 0, 0.6);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+}
+
+.send-overlay-spinner {
+  width: 54px;
+  height: 54px;
+  border: 5px solid rgba(255, 255, 255, 0.15);
+  border-top-color: var(--cyan);
+  border-radius: 50%;
+  animation: send-overlay-spin 0.9s linear infinite;
+}
+
+@keyframes send-overlay-spin { to { transform: rotate(360deg); } }
+
+.send-overlay-title { font-size: 1.1rem; font-weight: 600; margin: 0; }
+.send-overlay-count { font-size: 0.9rem; color: var(--text-dim); margin: 0; }
+
+.send-overlay-progress-bar {
+  width: 100%;
+  height: 8px;
+  background: var(--panel-3);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.send-overlay-progress-fill {
+  height: 100%;
+  background: var(--cyan);
+  transition: width 0.3s;
+}
