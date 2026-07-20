@@ -24,7 +24,11 @@ Section "Install"
   File "RadioStationImportStudio.exe"
   File "node.exe"
   File "main.js"
+  File "vocal-precise.js"
+  File "package.json"
   File /r "node_modules"
+  File /r "local-ui"
+  File /r "models"
 
   ; Runtime WebView2 (moteur Chromium de la fenêtre d'import CD) — absent sur certaines
   ; images Windows débloatées/VM, ce qui fait échouer EnsureCoreWebView2Async au runtime.

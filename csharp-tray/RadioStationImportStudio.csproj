@@ -12,6 +12,11 @@
     <SelfContained>true</SelfContained>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <InvariantGlobalization>true</InvariantGlobalization>
+    <!-- Sans ceci, WebView2Loader.dll (dépendance native du package Microsoft.Web.WebView2)
+         reste un fichier à part dans le dossier de publication au lieu d'être embarqué dans
+         l'exe single-file — installer.nsi ne l'embarquait pas (liste de File explicite non
+         mise à jour), d'où "impossible d'initialiser WebView2 : DLL was not found" en prod. -->
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
   </PropertyGroup>
   <ItemGroup>
     <!-- Fenêtre d'import CD intégrée (Phase 2b) — nécessite le runtime WebView2 installé sur
