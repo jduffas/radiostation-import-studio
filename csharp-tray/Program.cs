@@ -85,6 +85,9 @@ class TrayApp : ApplicationContext
     private ToolStripMenuItem? _updateMenuItem;
     private ToolStripMenuItem? _versionMenuItem;
     private System.Windows.Forms.Timer? _updatePollTimer;
+    // Lu depuis le thread qui lève process.Exited (pas le thread UI) — évite que le watchdog
+    // anti-crash ne relance node.exe pendant/après un Quit() volontaire (cf. StartNodeServer).
+    private volatile bool _quitting;
 
     private const int    Port          = 19847;
     private const string AppName       = "RadioStation Import Studio";
@@ -238,19 +241,26 @@ class TrayApp : ApplicationContext
         process.OutputDataReceived += (_, e) => { if (e.Data != null) AppendLog(logPath, e.Data); };
         process.ErrorDataReceived  += (_, e) => { if (e.Data != null) AppendLog(logPath, e.Data); };
 
-        // Redémarrage auto si crash après > 5s
+        // Redémarrage auto si crash après > 5s — jamais si l'arrêt vient d'un Quit() volontaire
+        // (sinon un node.exe fraîchement respawné survit à la fermeture de l'appli : orphelin,
+        // invisible sans icône tray, verrouille node.exe indéfiniment — bug réel observé : la
+        // réinstallation échouait à écrire node.exe même après avoir quitté l'application).
         process.Exited += (_, _) =>
         {
+            if (_quitting) return;
             var ran = DateTime.Now - _processStartTime;
             if (ran.TotalSeconds > 5)
             {
                 System.Threading.Thread.Sleep(2000);
-                StartNodeServer();
+                if (!_quitting) StartNodeServer();
             }
         };
 
         _processStartTime = DateTime.Now;
         process.Start();
+        // Filet de sécurité anti-orphelin (cf. JobObject.cs) — couvre les cas où ce process
+        // meurt sans exécuter Quit()/Dispose() (ex. taskkill externe d'installer.nsi).
+        try { JobObject.Attach(process.Handle); } catch { /* best-effort */ }
         process.BeginOutputReadLine();
         process.BeginErrorReadLine();
         _nodeProcess = process;
@@ -556,8 +566,14 @@ class TrayApp : ApplicationContext
 
     private void Quit()
     {
+        _quitting = true;
         _updatePollTimer?.Stop();
-        try { _nodeProcess?.Kill(); } catch { /* ignore */ }
+        try
+        {
+            _nodeProcess?.Kill();
+            _nodeProcess?.WaitForExit(3000); // laisse le temps au fichier node.exe de se libérer
+        }
+        catch { /* ignore */ }
         try { _importWindow?.Close(); } catch { /* ignore */ }
         _tray.Visible = false;
         Application.Exit();
@@ -567,6 +583,7 @@ class TrayApp : ApplicationContext
     {
         if (disposing)
         {
+            _quitting = true;
             _updatePollTimer?.Dispose();
             try { _nodeProcess?.Kill(); } catch { /* ignore */ }
             try { _importWindow?.Dispose(); } catch { /* ignore */ }
