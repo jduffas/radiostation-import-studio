@@ -26,6 +26,10 @@ Section "Install"
   File "main.js"
   File /r "node_modules"
 
+  ; Runtime WebView2 (moteur Chromium de la fenêtre d'import CD) — absent sur certaines
+  ; images Windows débloatées/VM, ce qui fait échouer EnsureCoreWebView2Async au runtime.
+  Call InstallWebView2IfMissing
+
   ; Raccourci Menu Démarrer
   CreateDirectory "$SMPROGRAMS\RadioStation"
   CreateShortcut  "$SMPROGRAMS\RadioStation\RadioStation Import Studio.lnk" \
@@ -48,6 +52,38 @@ Section "Install"
   ; Lancer l'application après installation
   Exec "$INSTDIR\RadioStationImportStudio.exe"
 SectionEnd
+
+; ─────────────────────────────────────────────────────────────────────────────
+; Runtime WebView2 — détection + installation silencieuse si absent
+; ─────────────────────────────────────────────────────────────────────────────
+
+Function InstallWebView2IfMissing
+  ; Installation machine (64 bits) ou utilisateur — GUID produit WebView2 Runtime.
+  SetRegView 64
+  ReadRegStr $0 HKLM "SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}" "pv"
+  StrCmp $0 "" 0 webview2_present
+  ReadRegStr $0 HKCU "SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}" "pv"
+  StrCmp $0 "" 0 webview2_present
+  ; Fallback registre 32 bits (build 32 bits du runtime sur une machine 64 bits).
+  SetRegView 32
+  ReadRegStr $0 HKLM "SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}" "pv"
+  StrCmp $0 "" 0 webview2_present
+
+  DetailPrint "WebView2 Runtime absent — installation en cours..."
+  File "MicrosoftEdgeWebView2Setup.exe"
+  ; /silent /install : pas de fenêtre. Sans droits admin, le bootstrapper Microsoft
+  ; retombe automatiquement sur une installation par utilisateur (cohérent avec
+  ; RequestExecutionLevel user ci-dessus).
+  nsExec::ExecToLog '"$INSTDIR\MicrosoftEdgeWebView2Setup.exe" /silent /install'
+  Pop $1
+  Delete "$INSTDIR\MicrosoftEdgeWebView2Setup.exe"
+  Goto webview2_done
+
+  webview2_present:
+  DetailPrint "WebView2 Runtime déjà présent."
+
+  webview2_done:
+FunctionEnd
 
 ; ─────────────────────────────────────────────────────────────────────────────
 ; Désinstallation

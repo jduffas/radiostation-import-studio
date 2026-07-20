@@ -89,6 +89,14 @@ Set-Content "$Mods\ffmpeg-static\package.json"  '{"name":"ffmpeg-static","versio
 Set-Content "$Mods\ffprobe-static\index.js" "const path = require('path'); module.exports = { path: path.join(__dirname, '..', '_bins', 'ffprobe.exe') };"
 Set-Content "$Mods\ffprobe-static\package.json" '{"name":"ffprobe-static","version":"3.1.0","main":"index.js"}'
 
+# ── 3c. Bootstrapper WebView2 (Evergreen, officiel Microsoft) ─────────────────
+# Le runtime WebView2 (moteur Chromium de la fenêtre d'import CD, csharp-tray/Program.cs)
+# n'est pas toujours présent (images Windows débloatées, VM). L'installeur NSIS le
+# détecte et l'installe silencieusement au besoin — cf. csharp-tray/installer.nsi.
+Write-Host "→ Téléchargement du bootstrapper WebView2 Runtime..."
+$WebView2Url = "https://go.microsoft.com/fwlink/p/?LinkId=2124703"
+Invoke-WebRequest -Uri $WebView2Url -OutFile (Join-Path $WinDir "MicrosoftEdgeWebView2Setup.exe") -UseBasicParsing
+
 # ── 4. NSIS installer ─────────────────────────────────────────────────────────
 Write-Host "→ Création de l'installer NSIS..."
 $NsiScript  = Join-Path $RootDir "csharp-tray\installer.nsi"
