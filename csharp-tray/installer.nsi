@@ -18,6 +18,19 @@ RequestExecutionLevel user   ; pas besoin de droits admin
 ; ─────────────────────────────────────────────────────────────────────────────
 
 Section "Install"
+  ; Ferme une instance déjà en cours (mise à jour par-dessus une install existante, sans
+  ; désinstallation manuelle préalable) — sinon RadioStationImportStudio.exe est verrouillé et
+  ; le File ci-dessous échoue. Nom unique, aucun risque de tuer un autre process par erreur —
+  ; contrairement à "node.exe" (trop générique : tuerait n'importe quel Node.js tiers en cours
+  ; sur la machine, ex. VS Code/autre projet dev). Le node.exe enfant bundlé peut donc rester
+  ; orphelin brièvement après ce taskkill : sans conséquence pour cette mise à jour, il ne
+  ; verrouille aucun des fichiers réécrits ci-dessous (main.js/local-ui/models/node_modules ne
+  ; sont jamais gardés ouverts par le serveur node — lus puis fermés) ; seul node.exe lui-même
+  ; (binaire figé, identique d'une version à l'autre) pourrait échouer à se réécrire, sans
+  ; impact puisque le contenu ne change pas.
+  nsExec::Exec 'taskkill /f /im RadioStationImportStudio.exe'
+  Sleep 300
+
   SetOutPath "$INSTDIR"
 
   ; Exécutable tray, Node.js, code serveur
