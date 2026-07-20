@@ -501,12 +501,22 @@ function getTocWin32() {
   return new Promise((resolve) => {
     const drive = getCdDevice() || 'D:';
     execFile(CD_READER_WIN, ['--cd-toc', drive], { timeout: 15000, maxBuffer: 1024 * 1024 },
-      (err, stdout) => {
-        if (err) return resolve({ tracks: [], leadout: 0 });
+      (err, stdout, stderr) => {
+        if (err) {
+          // Remonte dans server.log (stderr de main.js est redirigé là par le tray C#,
+          // cf. Program.cs#StartNodeServer) — avant ce correctif, un échec ici (lecteur
+          // introuvable, TOC illisible...) était totalement silencieux : "CD non détecté"
+          // sans aucune trace exploitable pour diagnostiquer à distance.
+          console.error(`[CdReaderWin] --cd-toc ${drive} a échoué : ${(stderr || err.message || '').trim()}`);
+          return resolve({ tracks: [], leadout: 0 });
+        }
         try {
           const data = JSON.parse(stdout);
           resolve({ tracks: Array.isArray(data.tracks) ? data.tracks : [], leadout: data.leadout || 0 });
-        } catch { resolve({ tracks: [], leadout: 0 }); }
+        } catch {
+          console.error(`[CdReaderWin] --cd-toc ${drive} : réponse JSON invalide : ${String(stdout).slice(0, 200)}`);
+          resolve({ tracks: [], leadout: 0 });
+        }
       });
   });
 }
