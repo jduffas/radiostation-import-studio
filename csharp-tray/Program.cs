@@ -68,6 +68,7 @@ class TrayApp : ApplicationContext
     private DateTime _processStartTime;
     private ImportWindow? _importWindow;
     private ToolStripMenuItem? _updateMenuItem;
+    private ToolStripMenuItem? _versionMenuItem;
     private System.Windows.Forms.Timer? _updatePollTimer;
 
     private const int    Port          = 19847;
@@ -99,6 +100,13 @@ class TrayApp : ApplicationContext
         _tray.ContextMenuStrip = BuildMenu();
         ShowStartupNotification();
 
+        // Le serveur node vient d'être lancé (StartNodeServer ci-dessus est fire-and-forget) —
+        // au premier affichage du menu il n'a souvent pas fini de démarrer (cold start, node_modules
+        // volumineux). On affiche le menu tout de suite et on complète le libellé version dès que
+        // /status répond, plutôt que de bloquer la construction du menu (ex-FetchAppVersion
+        // synchrone, qui affichait "Version ?" en cas de course perdue).
+        _ = RefreshVersionAsync();
+
         // "Mettre à jour…" démarre grisé (Enabled = false ci-dessus) — rafraîchi tout de suite
         // puis toutes les 5 min (lecture du cache de main.js, pas un nouvel appel GitHub à
         // chaque fois, cf. /update-check sans force). Timer WinForms : callback déjà sur le
@@ -120,7 +128,9 @@ class TrayApp : ApplicationContext
 
         menu.Items.Add(new ToolStripMenuItem(AppName)                     { Enabled = false });
         menu.Items.Add(new ToolStripMenuItem($"Serveur actif — port {Port}") { Enabled = false });
-        menu.Items.Add(new ToolStripMenuItem($"Version {FetchAppVersion()}") { Enabled = false });
+        var versionItem = new ToolStripMenuItem("Version…") { Enabled = false };
+        menu.Items.Add(versionItem);
+        _versionMenuItem = versionItem;
         menu.Items.Add(new ToolStripSeparator());
 
         var importItem = new ToolStripMenuItem("Nouvel import…");
@@ -320,24 +330,28 @@ class TrayApp : ApplicationContext
 
     // ── Vérification de mise à jour (GET /update-check, cf. main.js) ───────────
 
-    /// Lecture synchrone (bloque le thread UI au démarrage, court) de la version installée —
-    /// best-effort, même pattern que les autres lectures au tout premier affichage du menu (le
-    /// serveur node vient de démarrer, course possible).
-    private static string FetchAppVersion()
+    /// Complète le libellé "Version…" du menu dès que /status répond. Jusqu'à ~15s de retries
+    /// (le serveur node peut mettre du temps à démarrer au premier lancement — cold start,
+    /// dossier node_modules volumineux). Pas de blocage du thread UI (contrairement à l'ancienne
+    /// FetchAppVersion synchrone, qui abandonnait après ~400ms et laissait "Version ?" affiché).
+    private async Task RefreshVersionAsync()
     {
-        for (var attempt = 0; attempt < 3; attempt++)
+        for (var attempt = 0; attempt < 30; attempt++)
         {
-            if (attempt > 0) System.Threading.Thread.Sleep(200);
             try
             {
-                var json = Http.GetStringAsync(StatusUrl).GetAwaiter().GetResult();
+                var json = await Http.GetStringAsync(StatusUrl);
                 using var doc = JsonDocument.Parse(json);
                 if (doc.RootElement.TryGetProperty("version", out var v) && v.ValueKind == JsonValueKind.String)
-                    return v.GetString() ?? "?";
+                {
+                    if (_versionMenuItem != null) _versionMenuItem.Text = $"Version {v.GetString()}";
+                    return;
+                }
             }
             catch { /* serveur pas encore prêt — on retente */ }
+            await Task.Delay(500);
         }
-        return "?";
+        if (_versionMenuItem != null) _versionMenuItem.Text = "Version inconnue";
     }
 
     private record UpdateCheckResult(string CurrentVersion, string? LatestVersion, bool UpdateAvailable);
