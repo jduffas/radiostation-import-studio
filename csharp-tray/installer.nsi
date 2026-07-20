@@ -22,16 +22,27 @@ Section "Install"
   ; désinstallation manuelle préalable) — sinon RadioStationImportStudio.exe est verrouillé et
   ; le File ci-dessous échoue. Nom unique, aucun risque de tuer un autre process par erreur —
   ; contrairement à "node.exe" (trop générique : tuerait n'importe quel Node.js tiers en cours
-  ; sur la machine, ex. VS Code/autre projet dev). Le node.exe enfant bundlé peut donc rester
-  ; orphelin brièvement après ce taskkill : sans conséquence pour cette mise à jour, il ne
-  ; verrouille aucun des fichiers réécrits ci-dessous (main.js/local-ui/models/node_modules ne
-  ; sont jamais gardés ouverts par le serveur node — lus puis fermés) ; seul node.exe lui-même
-  ; (binaire figé, identique d'une version à l'autre) pourrait échouer à se réécrire, sans
-  ; impact puisque le contenu ne change pas.
+  ; sur la machine, ex. VS Code/autre projet dev). Le node.exe enfant bundlé n'est pas taskkill
+  ; directement pour cette raison ; le filet de sécurité contre un éventuel orphelin est la
+  ; technique de renommage juste plus bas (Windows autorise le renommage d'un exe verrouillé,
+  ; pas son écrasement), plus JobObject.cs côté C# qui évite l'orphelinat à la source.
   nsExec::Exec 'taskkill /f /im RadioStationImportStudio.exe'
   Sleep 300
 
   SetOutPath "$INSTDIR"
+
+  ; Filet de sécurité supplémentaire : un zombie d'une version antérieure au fix JobObject
+  ; (cf. JobObject.cs) peut encore avoir node.exe/l'exe tray ouverts malgré le taskkill
+  ; ci-dessus — écraser directement ces fichiers échoue alors ("impossible d'écrire node.exe").
+  ; Windows autorise en revanche de RENOMMER un exécutable en cours d'usage (contrairement à
+  ; l'écraser) — technique standard des auto-updaters. Bascule l'ancien fichier de côté avant
+  ; d'écrire le nouveau ; le résidu .old (uniquement si un process s'accroche encore dessus) est
+  ; nettoyé au mieux plus bas, sans bloquer l'installation si ça échoue. Rename/Delete sur un
+  ; fichier absent (premier install) sont des no-op silencieux en NSIS.
+  Delete "$INSTDIR\node.exe.old"
+  Rename "$INSTDIR\node.exe" "$INSTDIR\node.exe.old"
+  Delete "$INSTDIR\RadioStationImportStudio.exe.old"
+  Rename "$INSTDIR\RadioStationImportStudio.exe" "$INSTDIR\RadioStationImportStudio.exe.old"
 
   ; Exécutable tray, Node.js, code serveur
   File "RadioStationImportStudio.exe"
@@ -42,6 +53,11 @@ Section "Install"
   File /r "node_modules"
   File /r "local-ui"
   File /r "models"
+
+  ; Best-effort — laisse le résidu si un vieux process s'y accroche encore, sans conséquence
+  ; (l'app tourne déjà sur les fichiers fraîchement écrits ci-dessus, pas sur le .old).
+  Delete "$INSTDIR\node.exe.old"
+  Delete "$INSTDIR\RadioStationImportStudio.exe.old"
 
   ; Runtime WebView2 (moteur Chromium de la fenêtre d'import CD) — absent sur certaines
   ; images Windows débloatées/VM, ce qui fait échouer EnsureCoreWebView2Async au runtime.
@@ -54,10 +70,24 @@ Section "Install"
 
   ; Désinstalleur
   WriteUninstaller "$INSTDIR\uninstall.exe"
+  ; UninstallString DOIT être entre guillemets : $INSTDIR contient un espace ("Import Studio"),
+  ; sans quoi Windows (bouton "Désinstaller" des Paramètres, Apps & Features) coupe la commande
+  ; au premier espace et échoue à la lancer — symptôme observé : cliquer "Désinstaller" ouvrait
+  ; juste l'explorateur de fichiers à la racine du profil utilisateur au lieu de lancer uninstall.exe.
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\RadioStationImportStudio" \
               "DisplayName" "RadioStation Import Studio"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\RadioStationImportStudio" \
-              "UninstallString" "$INSTDIR\uninstall.exe"
+              "UninstallString" '"$INSTDIR\uninstall.exe"'
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\RadioStationImportStudio" \
+              "QuietUninstallString" '"$INSTDIR\uninstall.exe" /S'
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\RadioStationImportStudio" \
+              "DisplayIcon" '"$INSTDIR\RadioStationImportStudio.exe"'
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\RadioStationImportStudio" \
+              "InstallLocation" '"$INSTDIR"'
+  WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\RadioStationImportStudio" \
+              "NoModify" 1
+  WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\RadioStationImportStudio" \
+              "NoRepair" 1
 
   ; Schéma d'URL radiostation-importstudio:// (appairage autonome, Phase 2c) — équivalent Windows
   ; du CFBundleURLTypes macOS / protocols electron-builder retirés avec Electron.
