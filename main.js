@@ -14,7 +14,7 @@
 
 const http = require('node:http');
 const https = require('node:https');
-const { exec, execSync, spawn } = require('node:child_process');
+const { exec, execSync, spawn, execFile } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
@@ -487,6 +487,43 @@ function cdInputArg(trackNum) {
 }
 
 // ============================================================
+// Windows — lecture bas niveau (IOCTL CDROM bruts, csharp-tray/CdReaderWin.cs)
+// ============================================================
+// Aucun build ffmpeg-static (toutes plateformes confondues, vérifié directement sur le
+// binaire) ne supporte le protocole cdda:// — contrairement à macOS/Linux qui ont des chemins
+// alternatifs (volume monté+afconvert, cdparanoia), Windows n'a aucun filet de secours.
+// RadioStationImportStudio.exe (déjà présent à côté de main.js, cf. installer.nsi) expose deux
+// sous-commandes CLI headless pour ça : --cd-toc <lecteur> et --cd-rip <lecteur> <piste> <sortie>.
+
+const CD_READER_WIN = PLATFORM === 'win32' ? path.join(__dirname, 'RadioStationImportStudio.exe') : null;
+
+function getTocWin32() {
+  return new Promise((resolve) => {
+    const drive = getCdDevice() || 'D:';
+    execFile(CD_READER_WIN, ['--cd-toc', drive], { timeout: 15000, maxBuffer: 1024 * 1024 },
+      (err, stdout) => {
+        if (err) return resolve({ tracks: [], leadout: 0 });
+        try {
+          const data = JSON.parse(stdout);
+          resolve({ tracks: Array.isArray(data.tracks) ? data.tracks : [], leadout: data.leadout || 0 });
+        } catch { resolve({ tracks: [], leadout: 0 }); }
+      });
+  });
+}
+
+function ripTrackWin32(trackNum, outPath) {
+  return new Promise((resolve, reject) => {
+    const drive = getCdDevice() || 'D:';
+    execFile(CD_READER_WIN, ['--cd-rip', drive, String(trackNum), outPath], { timeout: 120000 },
+      (err, _stdout, stderr) => {
+        if (err) return reject(new Error(`CdReaderWin (piste ${trackNum}) : ${(stderr || err.message).trim()}`));
+        if (!fs.existsSync(outPath)) return reject(new Error(`CdReaderWin (piste ${trackNum}) : fichier de sortie manquant`));
+        resolve();
+      });
+  });
+}
+
+// ============================================================
 // macOS — volume monté (évite cdda:// qui déclenche Music)
 // ============================================================
 // Quand un CD audio est inséré sur macOS il se monte dans /Volumes/
@@ -723,6 +760,11 @@ async function getToc() {
     return { tracks: [], leadout: 0 };
   }
 
+  // Windows — jamais de ffprobe non plus (cdda:// non supporté, cf. commentaire CD_READER_WIN)
+  if (PLATFORM === 'win32') {
+    return getTocWin32();
+  }
+
   return getTocFfprobe();
 }
 
@@ -746,7 +788,15 @@ async function checkCd() {
     result = await checkCdMacos();
   }
 
-  // Sur darwin : ne pas utiliser ffprobe (cdda:// déclenche l'ouverture de Music)
+  if (!result && PLATFORM === 'win32') {
+    const toc = await getTocWin32();
+    result = toc.tracks.length > 0
+      ? { cdDetected: true, trackCount: toc.tracks.length }
+      : { cdDetected: false, trackCount: 0 };
+  }
+
+  // Sur darwin/win32 : ne pas utiliser ffprobe (cdda:// déclenche l'ouverture de Music sur mac,
+  // et n'est de toute façon supporté par aucun build ffmpeg-static, cf. CD_READER_WIN)
   if (!result && PLATFORM !== 'darwin') {
     const dur = await probeTrackFfprobe(1);
     if (!dur) {
@@ -988,7 +1038,12 @@ async function ripTrack(trackNum, outPath, toc = null) {
     throw new Error(`Impossible de lire la piste ${trackNum} — device: ${device || 'non trouvé'}`);
   }
 
-  // ffmpeg bundlé (Windows Electron) → toujours ffmpeg
+  // Windows — IOCTL bruts (CdReaderWin), aucun fallback ffmpeg possible (cdda:// non supporté)
+  if (PLATFORM === 'win32') {
+    return ripTrackWin32(trackNum, outPath);
+  }
+
+  // ffmpeg bundlé → toujours ffmpeg
   if (BUNDLED_FFMPEG) return ripTrackFfmpeg(trackNum, outPath);
 
   // Linux standalone → cdparanoia avec fallback ffmpeg

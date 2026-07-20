@@ -30,6 +30,21 @@ static class Program
     [STAThread]
     static void Main(string[] args)
     {
+        // Mode CLI headless — main.js spawn ce même exe pour la lecture bas niveau du CD
+        // (cf. CdReaderWin.cs), sur le même principe qu'un binaire externe type cdparanoia sur
+        // Linux. Pas de fenêtre, pas de Mutex single-instance : plusieurs invocations peuvent
+        // s'enchaîner (une par piste) indépendamment d'une éventuelle instance tray déjà ouverte.
+        if (args.Length >= 2 && args[0] == "--cd-toc")
+        {
+            Environment.Exit(CdReaderWin.RunToc(args[1]));
+            return;
+        }
+        if (args.Length >= 4 && args[0] == "--cd-rip")
+        {
+            Environment.Exit(CdReaderWin.RunRip(args[1], int.Parse(args[2]), args[3]));
+            return;
+        }
+
         var pairingUrl = Array.Find(args, a => a.StartsWith("radiostation-importstudio://", StringComparison.OrdinalIgnoreCase));
 
         using var mutex = new Mutex(initiallyOwned: true, MutexName, out var isFirstInstance);
